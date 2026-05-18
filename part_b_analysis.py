@@ -39,7 +39,8 @@ def _imports():
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
-    from scipy import odr
+    from taulab.fits import odr_fit, fit_functions
+    from taulab.stats import nsigma
 
     plt.rcParams.update({
         "font.size": 10,
@@ -50,14 +51,14 @@ def _imports():
         "figure.dpi": 200,
         "savefig.dpi": 200,
     })
-    return Path, mo, np, odr, pd, plt
+    return Path, fit_functions, mo, np, nsigma, odr_fit, pd, plt
 
 
 @app.cell
 def _paths(Path):
-    ROOT = Path(__file__).resolve().parent.parent
+    ROOT = Path(__file__).resolve().parent
     DATA = ROOT / "data" / "part_b"
-    OUT_DIR = ROOT / "analysis" / "results" / "part_b"
+    OUT_DIR = ROOT / "results" / "part_b"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     return DATA, OUT_DIR
 
@@ -141,48 +142,43 @@ def _instrument_uncertainties(HALL_T_PER_V, np):
 
 
 @app.cell
-def _fit_helpers(np, odr, pd):
+def _fit_helpers(fit_functions, np, odr_fit, pd):
+    """ODR line fit via taulab — y = A0 + A1·x (taulab polynomial convention).
+
+    Re-mapped to the (slope, intercept) names used downstream:
+      slope = A1, intercept = A0.
+    Covariance is reordered to (slope, intercept) basis to keep all
+    Jacobian propagation in this script consistent.
+    """
+
     def linear_fit(x, y, xerr=None, yerr=None):
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
-        coeffs = np.polyfit(x, y, 1)
-
-        if xerr is not None or yerr is not None:
-            sx = None if xerr is None else np.asarray(xerr, dtype=float)
-            sy = None if yerr is None else np.asarray(yerr, dtype=float)
-            # ODR includes uncertainty in both axes. Start from the ordinary
-            # least-squares solution so convergence is deterministic.
-            model = odr.Model(lambda beta, xx: beta[0] * xx + beta[1])
-            data = odr.RealData(x, y, sx=sx, sy=sy)
-            output = odr.ODR(data, model, beta0=coeffs).run()
-            coeffs = output.beta
-            cov = output.cov_beta * output.res_var
-            err = output.sd_beta
-            y_fit = coeffs[0] * x + coeffs[1]
-            dof = max(1, len(x) - 2)
-            chi2_terms = np.zeros_like(x)
-            if sx is not None:
-                chi2_terms += (output.delta / sx) ** 2
-            if sy is not None:
-                chi2_terms += (output.eps / sy) ** 2
-            chi2_dof = float(np.sum(chi2_terms) / dof)
-            method = "ODR"
-        else:
-            coeffs, cov = np.polyfit(x, y, 1, cov=True)
-            err = np.sqrt(np.diag(cov)) if cov.shape == (2, 2) else np.array([np.nan, np.nan])
-            y_fit = coeffs[0] * x + coeffs[1]
-            dof = max(1, len(x) - 2)
-            chi2_dof = float(np.sum((y - y_fit) ** 2) / dof)
-            method = "OLS"
-
+        sx = None if xerr is None else np.asarray(xerr, dtype=float)
+        sy = None if yerr is None else np.asarray(yerr, dtype=float)
+        # Synthesize a tiny σ floor if a side wasn't supplied — taulab's
+        # ODR requires both. 1e-12 in data units is below any real noise.
+        if sx is None: sx = np.full_like(x, 1e-12)
+        if sy is None: sy = np.full_like(y, 1e-12)
+        res = odr_fit(
+            fit_functions.linear, None,  # taulab auto-seeds from polyfit
+            x, sx, y, sy,
+            param_names=["A0", "A1"],
+        )
+        A0, A1 = res.params
+        sA0, sA1 = res.errors
+        # Reorder cov from (A0, A1) to (slope, intercept) = (A1, A0).
+        cov_AA = res.cov if res.cov is not None else np.zeros((2, 2))
+        cov = np.array([[cov_AA[1, 1], cov_AA[1, 0]],
+                        [cov_AA[0, 1], cov_AA[0, 0]]])
         return dict(
-            slope=float(coeffs[0]),
-            intercept=float(coeffs[1]),
-            slope_err=float(err[0]),
-            intercept_err=float(err[1]),
+            slope=float(A1),
+            intercept=float(A0),
+            slope_err=float(sA1),
+            intercept_err=float(sA0),
             covariance=cov,
-            chi2_dof=chi2_dof,
-            method=method,
+            chi2_dof=float(res.redchi),
+            method="ODR",
             n=len(x),
         )
 
@@ -270,66 +266,33 @@ def _plot_calibration(cal, cal_fit, np, plt):
     _xerr = cal["coil_current_err_A"].to_numpy()
     _yerr = cal["combined_B_err_mT"].to_numpy()
     _xx = np.linspace(_x.min(), _x.max(), 300)
+    _color = "#1f77b4"
     ax_cal.errorbar(
-        _x,
-        cal["raw_B_mT"],
-        yerr=_yerr,
-        fmt="o",
-        ms=3.2,
-        color="#1f77b4",
-        ecolor="#1f77b4",
-        elinewidth=0.8,
-        capsize=2.0,
-        alpha=0.85,
-        label="Hall $B$ uncertainty",
-        zorder=3,
-    )
-    ax_cal.hlines(
-        cal["raw_B_mT"],
-        _x - _xerr,
-        _x + _xerr,
-        colors="#ff7f0e",
-        linewidth=2.2,
-        alpha=0.95,
-        label="coil-current uncertainty",
-        zorder=4,
+        _x, cal["raw_B_mT"], xerr=_xerr, yerr=_yerr,
+        fmt="o", ms=4.0, mfc="none", mec=_color, mew=0.8,
+        ecolor=_color, elinewidth=0.5, capsize=0,
+        alpha=0.85, zorder=2, label="data",
     )
     ax_cal.plot(
         _xx,
         cal_fit["slope"] * _xx + cal_fit["intercept"],
-        color="#d62728", lw=1.8,
+        color="#d62728", lw=1.6, zorder=3,
         label=rf"$B = ({cal_fit['slope']:.4f})I {cal_fit['intercept']:+.4f}$ mT",
     )
     ax_cal.set_title("Empty-coil calibration")
     ax_cal.set_ylabel(r"$B_\mathrm{coil}$ (mT)")
     ax_cal.legend(frameon=False)
-    ax_res.axhline(0, color="0.25", lw=0.8)
+    ax_res.axhline(0, color="0.4", lw=0.6, ls=(0, (1, 2)))
     ax_res.errorbar(
-        _x,
-        cal["residual_B_mT"],
-        yerr=_yerr,
-        fmt="o",
-        ms=3.0,
-        color="#1f77b4",
-        ecolor="#1f77b4",
-        elinewidth=0.8,
-        capsize=2.0,
-        alpha=0.85,
-        zorder=3,
-    )
-    ax_res.hlines(
-        cal["residual_B_mT"],
-        _x - _xerr,
-        _x + _xerr,
-        colors="#ff7f0e",
-        linewidth=2.2,
-        alpha=0.95,
-        zorder=4,
+        _x, cal["residual_B_mT"], xerr=_xerr, yerr=_yerr,
+        fmt="o", ms=4.0, mfc="none", mec=_color, mew=0.8,
+        ecolor=_color, elinewidth=0.5, capsize=0,
+        alpha=0.85, zorder=2,
     )
     ax_res.set_xlabel("Coil current (A)")
     ax_res.set_ylabel("res. (mT)")
     for _ax in (ax_cal, ax_res):
-        _ax.grid(True, alpha=0.25, lw=0.6)
+        _ax.grid(True, alpha=0.15, lw=0.5)
         _ax.tick_params(direction="in", top=True, right=True)
     fig_cal.tight_layout()
     fig_cal
@@ -514,72 +477,34 @@ def _plot_bh_full(
 ):
     fig_bh, _ax_bh = plt.subplots(figsize=(8.0, 5.2))
     _ax_bh.errorbar(
-        disk_bh["H_mT"],
-        disk_bh["B_mT"],
-        yerr=disk_bh["B_err_mT"],
-        fmt="o",
-        ms=3.2,
-        color="0.35",
-        ecolor="0.55",
-        elinewidth=0.8,
-        capsize=2.0,
-        alpha=0.72,
-        label="cleaned disk data",
-    )
-    _ax_bh.hlines(
-        disk_bh["B_mT"],
-        disk_bh["H_mT"] - disk_bh["H_err_mT"],
-        disk_bh["H_mT"] + disk_bh["H_err_mT"],
-        colors="0.35",
-        linewidth=1.2,
-        alpha=0.75,
+        disk_bh["H_mT"], disk_bh["B_mT"],
+        xerr=disk_bh["H_err_mT"], yerr=disk_bh["B_err_mT"],
+        fmt="o", ms=3.5, mfc="none", mec="0.35", mew=0.7,
+        ecolor="0.5", elinewidth=0.5, capsize=0,
+        alpha=0.7, zorder=2, label="cleaned disk data",
     )
     _ax_bh.errorbar(
-        low_region["H_mT"],
-        low_region["B_mT"],
-        yerr=low_region["B_err_mT"],
-        fmt="o",
-        ms=4.2,
-        color="#1f77b4",
-        ecolor="#1f77b4",
-        elinewidth=0.9,
-        capsize=2.0,
+        low_region["H_mT"], low_region["B_mT"],
+        xerr=low_region["H_err_mT"], yerr=low_region["B_err_mT"],
+        fmt="o", ms=4.5, mfc="none", mec="#1f77b4", mew=0.9,
+        ecolor="#1f77b4", elinewidth=0.6, capsize=0,
+        alpha=0.95, zorder=3,
         label=rf"low fit: $H \leq {LOW_FIELD_MAX_MT:.2f}$ mT",
     )
-    _ax_bh.hlines(
-        low_region["B_mT"],
-        low_region["H_mT"] - low_region["H_err_mT"],
-        low_region["H_mT"] + low_region["H_err_mT"],
-        colors="#1f77b4",
-        linewidth=1.8,
-        alpha=0.95,
-    )
     _ax_bh.errorbar(
-        high_region["H_mT"],
-        high_region["B_mT"],
-        yerr=high_region["B_err_mT"],
-        fmt="o",
-        ms=4.2,
-        color="#d62728",
-        ecolor="#d62728",
-        elinewidth=0.9,
-        capsize=2.0,
+        high_region["H_mT"], high_region["B_mT"],
+        xerr=high_region["H_err_mT"], yerr=high_region["B_err_mT"],
+        fmt="o", ms=4.5, mfc="none", mec="#d62728", mew=0.9,
+        ecolor="#d62728", elinewidth=0.6, capsize=0,
+        alpha=0.95, zorder=3,
         label=rf"high fit: $H \geq {HIGH_FIELD_MIN_MT:.1f}$ mT",
     )
-    _ax_bh.hlines(
-        high_region["B_mT"],
-        high_region["H_mT"] - high_region["H_err_mT"],
-        high_region["H_mT"] + high_region["H_err_mT"],
-        colors="#d62728",
-        linewidth=1.8,
-        alpha=0.95,
-    )
-    _ax_bh.axvspan(0, LOW_FIELD_MAX_MT, color="#1f77b4", alpha=0.08, lw=0)
-    _ax_bh.axvspan(HIGH_FIELD_MIN_MT, disk_bh["H_mT"].max(), color="#d62728", alpha=0.06, lw=0)
+    _ax_bh.axvspan(0, LOW_FIELD_MAX_MT, color="#1f77b4", alpha=0.06, lw=0)
+    _ax_bh.axvspan(HIGH_FIELD_MIN_MT, disk_bh["H_mT"].max(), color="#d62728", alpha=0.05, lw=0)
     _ax_bh.set_title(r"$B(H)$ with superconducting disk")
     _ax_bh.set_xlabel(r"Applied field $H$ (mT)")
     _ax_bh.set_ylabel(r"Measured field $B$ (mT)")
-    _ax_bh.grid(True, alpha=0.25, lw=0.6)
+    _ax_bh.grid(True, alpha=0.15, lw=0.5)
     _ax_bh.tick_params(direction="in", top=True, right=True)
     _ax_bh.legend(frameon=False)
     fig_bh.tight_layout()
@@ -609,60 +534,48 @@ def _plot_fit_windows(
 ):
     fig_windows, (ax_low, ax_high) = plt.subplots(1, 2, figsize=(10.0, 4.2))
 
-    ax_low.errorbar(
-        disk_bh["H_mT"],
-        disk_bh["B_mT"],
-        yerr=disk_bh["B_err_mT"],
-        fmt="o",
-        ms=2.8,
-        color="0.55",
-        ecolor="0.62",
-        elinewidth=0.7,
-        capsize=1.8,
-        alpha=0.75,
+    _kw = dict(
+        fmt="o", ms=3.5, mfc="none", mec="0.45", mew=0.7,
+        ecolor="0.55", elinewidth=0.5, capsize=0, alpha=0.75, zorder=2,
     )
-    ax_low.hlines(
-        disk_bh["B_mT"],
-        disk_bh["H_mT"] - disk_bh["H_err_mT"],
-        disk_bh["H_mT"] + disk_bh["H_err_mT"],
-        colors="0.45",
-        linewidth=1.0,
-        alpha=0.8,
+    ax_low.errorbar(
+        disk_bh["H_mT"], disk_bh["B_mT"],
+        xerr=disk_bh["H_err_mT"], yerr=disk_bh["B_err_mT"], **_kw,
     )
     _x_low, _y_low = line_xy(low_fit, 0, LOW_FIELD_MAX_MT)
-    ax_low.plot(_x_low, _y_low, color="#1f77b4", lw=1.8, label=rf"$B={low_fit['slope']:.3f}H{low_fit['intercept']:+.3f}$")
+    ax_low.plot(_x_low, _y_low, color="#1f77b4", lw=1.6, zorder=3,
+                label=rf"$B={low_fit['slope']:.3f}H{low_fit['intercept']:+.3f}$")
     ax_low.set_xlim(-0.02, LOW_FIELD_MAX_MT + 0.05)
+    # Y-autoscale from only the points visible in the low-H window
+    # (otherwise matplotlib spans the full B range from the high-H tail).
+    _vis = disk_bh[disk_bh["H_mT"].between(-0.02, LOW_FIELD_MAX_MT + 0.05)]
+    _y = _vis["B_mT"].to_numpy(); _ye = _vis["B_err_mT"].to_numpy()
+    if len(_y):
+        _lo, _hi = (_y - _ye).min(), (_y + _ye).max()
+        _pad = 0.10 * (_hi - _lo) if _hi > _lo else 0.02
+        ax_low.set_ylim(_lo - _pad, _hi + _pad)
     ax_low.set_title("Low-field fit")
 
     ax_high.errorbar(
-        disk_bh["H_mT"],
-        disk_bh["B_mT"],
-        yerr=disk_bh["B_err_mT"],
-        fmt="o",
-        ms=2.8,
-        color="0.55",
-        ecolor="0.62",
-        elinewidth=0.7,
-        capsize=1.8,
-        alpha=0.75,
-    )
-    ax_high.hlines(
-        disk_bh["B_mT"],
-        disk_bh["H_mT"] - disk_bh["H_err_mT"],
-        disk_bh["H_mT"] + disk_bh["H_err_mT"],
-        colors="0.45",
-        linewidth=1.0,
-        alpha=0.8,
+        disk_bh["H_mT"], disk_bh["B_mT"],
+        xerr=disk_bh["H_err_mT"], yerr=disk_bh["B_err_mT"], **_kw,
     )
     _x_high, _y_high = line_xy(high_fit, HIGH_FIELD_MIN_MT, disk_bh["H_mT"].max())
-    ax_high.plot(_x_high, _y_high, color="#d62728", lw=1.8, label=rf"$B={high_fit['slope']:.3f}H{high_fit['intercept']:+.3f}$")
+    ax_high.plot(_x_high, _y_high, color="#d62728", lw=1.6, zorder=3,
+                 label=rf"$B={high_fit['slope']:.3f}H{high_fit['intercept']:+.3f}$")
     ax_high.set_xlim(HIGH_FIELD_MIN_MT - 0.1, disk_bh["H_mT"].max() + 0.15)
+    _vis_h = disk_bh[disk_bh["H_mT"] >= HIGH_FIELD_MIN_MT - 0.1]
+    _yh = _vis_h["B_mT"].to_numpy(); _yhe = _vis_h["B_err_mT"].to_numpy()
+    if len(_yh):
+        _lo, _hi = (_yh - _yhe).min(), (_yh + _yhe).max()
+        _pad = 0.10 * (_hi - _lo) if _hi > _lo else 0.02
+        ax_high.set_ylim(_lo - _pad, _hi + _pad)
     ax_high.set_title("High-field fit")
 
     for _ax in (ax_low, ax_high):
         _ax.set_xlabel(r"Applied field $H$ (mT)")
         _ax.set_ylabel(r"Measured field $B$ (mT)")
-        _ax.grid(True, alpha=0.25, lw=0.6)
+        _ax.grid(True, alpha=0.15, lw=0.5)
         _ax.tick_params(direction="in", top=True, right=True)
         _ax.legend(frameon=False)
     fig_windows.tight_layout()
@@ -692,44 +605,28 @@ def _plot_intersection(
         H_star_err_mT**2 + H_star_window_err_mT**2 + _h_star_cal_err**2
     ) ** 0.5
     _ax_int.errorbar(
-        disk_bh["H_mT"],
-        disk_bh["B_mT"],
-        yerr=disk_bh["B_err_mT"],
-        fmt="o",
-        ms=3.2,
-        color="0.4",
-        ecolor="0.58",
-        elinewidth=0.8,
-        capsize=2.0,
-        alpha=0.78,
-        label="cleaned disk data",
-    )
-    _ax_int.hlines(
-        disk_bh["B_mT"],
-        disk_bh["H_mT"] - disk_bh["H_err_mT"],
-        disk_bh["H_mT"] + disk_bh["H_err_mT"],
-        colors="0.35",
-        linewidth=1.2,
-        alpha=0.85,
+        disk_bh["H_mT"], disk_bh["B_mT"],
+        xerr=disk_bh["H_err_mT"], yerr=disk_bh["B_err_mT"],
+        fmt="o", ms=3.5, mfc="none", mec="0.35", mew=0.7,
+        ecolor="0.5", elinewidth=0.5, capsize=0,
+        alpha=0.78, zorder=2, label="cleaned disk data",
     )
     _x_int, _y_low_int = line_xy(low_fit, 0, disk_bh["H_mT"].max())
     _, _y_high_int = line_xy(high_fit, 0, disk_bh["H_mT"].max())
-    _ax_int.plot(_x_int, _y_low_int, color="#1f77b4", lw=1.6, label="low-field line")
-    _ax_int.plot(_x_int, _y_high_int, color="#d62728", lw=1.6, label="high-field line")
+    _ax_int.plot(_x_int, _y_low_int, color="#1f77b4", lw=1.6, zorder=3, label="low-field line")
+    _ax_int.plot(_x_int, _y_high_int, color="#d62728", lw=1.6, zorder=3, label="high-field line")
     _ax_int.axvspan(
-        H_star_mT - _h_star_total_err,
-        H_star_mT + _h_star_total_err,
-        color="black",
-        alpha=0.08,
-        lw=0,
+        H_star_mT - _h_star_total_err, H_star_mT + _h_star_total_err,
+        color="black", alpha=0.08, lw=0,
         label=rf"$\sigma_{{H^*}}={_h_star_total_err:.3f}$ mT",
     )
-    _ax_int.scatter([H_star_mT], [B_star_mT], s=70, color="black", marker="*", zorder=5, label=rf"$H^*={H_star_mT:.3f}$ mT")
-    _ax_int.axvline(H_star_mT, color="black", lw=1.0, ls="--", alpha=0.65)
+    _ax_int.scatter([H_star_mT], [B_star_mT], s=70, color="black", marker="*", zorder=5,
+                    label=rf"$H^*={H_star_mT:.3f}$ mT")
+    _ax_int.axvline(H_star_mT, color="black", lw=0.9, ls=(0, (6, 3)), alpha=0.65)
     _ax_int.set_title("Penetration-field intersection")
     _ax_int.set_xlabel(r"Applied field $H$ (mT)")
     _ax_int.set_ylabel(r"Measured field $B$ (mT)")
-    _ax_int.grid(True, alpha=0.25, lw=0.6)
+    _ax_int.grid(True, alpha=0.15, lw=0.5)
     _ax_int.tick_params(direction="in", top=True, right=True)
     _ax_int.legend(frameon=False)
     fig_intersection.tight_layout()
@@ -766,55 +663,31 @@ def _plot_intersection_zoom(
 
     fig_intersection_zoom, _ax_zoom = plt.subplots(figsize=(7.2, 5.0))
     _ax_zoom.errorbar(
-        _disk_zoom["H_mT"],
-        _disk_zoom["B_mT"],
-        yerr=_disk_zoom["B_err_mT"],
-        fmt="o",
-        ms=4.0,
-        color="0.4",
-        ecolor="0.58",
-        elinewidth=0.9,
-        capsize=2.2,
-        alpha=0.82,
-        label="cleaned disk data",
-    )
-    _ax_zoom.hlines(
-        _disk_zoom["B_mT"],
-        _disk_zoom["H_mT"] - _disk_zoom["H_err_mT"],
-        _disk_zoom["H_mT"] + _disk_zoom["H_err_mT"],
-        colors="0.35",
-        linewidth=1.5,
-        alpha=0.9,
+        _disk_zoom["H_mT"], _disk_zoom["B_mT"],
+        xerr=_disk_zoom["H_err_mT"], yerr=_disk_zoom["B_err_mT"],
+        fmt="o", ms=4.5, mfc="none", mec="0.35", mew=0.8,
+        ecolor="0.5", elinewidth=0.5, capsize=0,
+        alpha=0.85, zorder=2, label="cleaned disk data",
     )
     _x_zoom, _y_low_zoom = line_xy(low_fit, _x_lo, _x_hi)
     _, _y_high_zoom = line_xy(high_fit, _x_lo, _x_hi)
-    _ax_zoom.plot(_x_zoom, _y_low_zoom, color="#1f77b4", lw=1.8, label="low-field line")
-    _ax_zoom.plot(_x_zoom, _y_high_zoom, color="#d62728", lw=1.8, label="high-field line")
+    _ax_zoom.plot(_x_zoom, _y_low_zoom, color="#1f77b4", lw=1.6, zorder=3, label="low-field line")
+    _ax_zoom.plot(_x_zoom, _y_high_zoom, color="#d62728", lw=1.6, zorder=3, label="high-field line")
     _ax_zoom.axvspan(
-        H_star_mT - _h_star_total_err,
-        H_star_mT + _h_star_total_err,
-        color="black",
-        alpha=0.10,
-        lw=0,
+        H_star_mT - _h_star_total_err, H_star_mT + _h_star_total_err,
+        color="black", alpha=0.10, lw=0,
         label=rf"$\sigma_{{H^*}}={_h_star_total_err:.3f}$ mT",
     )
-    _ax_zoom.scatter(
-        [H_star_mT],
-        [B_star_mT],
-        s=90,
-        color="black",
-        marker="*",
-        zorder=5,
-        label=rf"$H^*={H_star_mT:.3f}$ mT",
-    )
-    _ax_zoom.axvline(H_star_mT, color="black", lw=1.0, ls="--", alpha=0.65)
-    _ax_zoom.axhline(B_star_mT, color="black", lw=1.0, ls=":", alpha=0.5)
+    _ax_zoom.scatter([H_star_mT], [B_star_mT], s=90, color="black", marker="*", zorder=5,
+                     label=rf"$H^*={H_star_mT:.3f}$ mT")
+    _ax_zoom.axvline(H_star_mT, color="black", lw=0.9, ls=(0, (6, 3)), alpha=0.65)
+    _ax_zoom.axhline(B_star_mT, color="black", lw=0.9, ls=(0, (1, 2)), alpha=0.55)
     _ax_zoom.set_xlim(_x_lo, _x_hi)
     _ax_zoom.set_ylim(_y_lo, _y_hi)
     _ax_zoom.set_title("Penetration-field intersection (zoom)")
     _ax_zoom.set_xlabel(r"Applied field $H$ (mT)")
     _ax_zoom.set_ylabel(r"Measured field $B$ (mT)")
-    _ax_zoom.grid(True, alpha=0.25, lw=0.6)
+    _ax_zoom.grid(True, alpha=0.15, lw=0.5)
     _ax_zoom.tick_params(direction="in", top=True, right=True)
     _ax_zoom.legend(frameon=False, loc="upper left")
     fig_intersection_zoom.tight_layout()
@@ -911,6 +784,22 @@ def _results(
 
 
 @app.cell
+def _reference():
+    """Reference J_c to compare against, via `taulab.stats.nsigma`.
+
+    Eltsev et al. (arXiv:0909.1628v3) report J_c for high-quality
+    Bi-2223 single crystals of order 10^9 A/m² at low T, with values
+    comparable to Bi-2223/Ag conductors. The number below is a
+    teaching-lab placeholder; EDIT once you have the value/σ you want
+    to compare your J_c against (e.g. from Eltsev Fig. 5 at your
+    chosen reference temperature/field).
+    """
+    JC_REF_A_PER_M2       = 1.0e9
+    JC_REF_SIGMA_A_PER_M2 = 0.5e9
+    return JC_REF_A_PER_M2, JC_REF_SIGMA_A_PER_M2
+
+
+@app.cell
 def _md_summary(mo):
     mo.md(r"""
     ## Results
@@ -929,44 +818,39 @@ def _md_summary(mo):
 
 
 @app.cell
-def _show_results(results):
-    results[[
-        "coil_slope_mT_per_A",
-        "coil_slope_err_mT_per_A",
-        "low_slope",
-        "low_slope_err",
-        "high_slope",
-        "high_slope_err",
-        "H_star_mT",
-        "H_star_fit_err_mT",
-        "H_star_window_err_mT",
-        "H_star_calibration_err_mT",
-        "H_star_total_err_mT",
-        "Jc_A_per_m2",
-        "Jc_fit_err_A_per_m2",
-        "Jc_window_err_A_per_m2",
-        "Jc_calibration_err_A_per_m2",
-        "Jc_thickness_err_A_per_m2",
-        "Jc_total_err_A_per_m2",
-    ]].round({
-        "coil_slope_mT_per_A": 4,
-        "coil_slope_err_mT_per_A": 4,
-        "low_slope": 3,
-        "low_slope_err": 3,
-        "high_slope": 3,
-        "high_slope_err": 3,
-        "H_star_mT": 3,
-        "H_star_fit_err_mT": 3,
-        "H_star_window_err_mT": 3,
-        "H_star_calibration_err_mT": 6,
-        "H_star_total_err_mT": 3,
-        "Jc_A_per_m2": 2,
-        "Jc_fit_err_A_per_m2": 2,
-        "Jc_window_err_A_per_m2": 2,
-        "Jc_calibration_err_A_per_m2": 2,
-        "Jc_thickness_err_A_per_m2": 2,
-        "Jc_total_err_A_per_m2": 2,
-    })
+def _show_results(
+    JC_REF_A_PER_M2, JC_REF_SIGMA_A_PER_M2, nsigma, pd, results,
+):
+    """Compact summary: value ± σ (rel%) and N_σ against the literature J_c."""
+    def _fmt(val, err, unit="", sig=3):
+        rel = (err / abs(val) * 100.0) if val else float("nan")
+        return f"{val:.{sig}g} ± {err:.{sig}g}{unit} ({rel:.2f}%)"
+
+    _r = results.iloc[0]
+    _Hs, _Hs_err = _r["H_star_mT"], _r["H_star_total_err_mT"]
+    _Jc, _Jc_err = _r["Jc_A_per_m2"], _r["Jc_total_err_A_per_m2"]
+    _ns = nsigma((_Jc, _Jc_err), (JC_REF_A_PER_M2, JC_REF_SIGMA_A_PER_M2))
+
+    final_table = pd.DataFrame([
+        {"quantity": "coil slope a₁ [mT/A]",
+         "value":    _fmt(_r["coil_slope_mT_per_A"], _r["coil_slope_err_mT_per_A"])},
+        {"quantity": "low-field slope",
+         "value":    _fmt(_r["low_slope"], _r["low_slope_err"])},
+        {"quantity": "high-field slope",
+         "value":    _fmt(_r["high_slope"], _r["high_slope_err"])},
+        {"quantity": "H* [mT]",
+         "value":    _fmt(_Hs, _Hs_err)},
+        {"quantity": "J_c [A/m²]",
+         "value":    _fmt(_Jc, _Jc_err)},
+        {"quantity": f"N_σ vs J_c,ref = {JC_REF_A_PER_M2:.2g} ± {JC_REF_SIGMA_A_PER_M2:.2g}",
+         "value":    f"{_ns:.2f}"},
+    ])
+    return (final_table,)
+
+
+@app.cell
+def _display_final(final_table):
+    final_table
     return
 
 
@@ -994,12 +878,13 @@ def _show_fit_table(fit_table):
 
 
 @app.cell
-def _write(OUT_DIR, cal, disk_bh, fit_table, results, window_sensitivity):
+def _write(OUT_DIR, cal, disk_bh, final_table, fit_table, results, window_sensitivity):
     cal.to_csv(OUT_DIR / "coil_calibration_refit.csv", index=False)
     disk_bh.to_csv(OUT_DIR / "disk_BH_with_uncertainties.csv", index=False)
     fit_table.to_csv(OUT_DIR / "fit_table.csv", index=False)
     window_sensitivity.to_csv(OUT_DIR / "fit_window_sensitivity.csv", index=False)
     results.to_csv(OUT_DIR / "part_b_results.csv", index=False)
+    final_table.to_csv(OUT_DIR / "part_b_summary.csv", index=False)
     print(f"wrote {OUT_DIR / 'part_b_results.csv'}")
     return
 
