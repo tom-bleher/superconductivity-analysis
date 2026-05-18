@@ -62,10 +62,10 @@ def _imports():
 
 @app.cell
 def _paths(Path):
-    ROOT = Path(__file__).resolve().parent.parent
+    ROOT = Path(__file__).resolve().parent
     DATA = ROOT / "data" / "part_a"
     MEAS_DIR = DATA / "measurements"
-    OUT_DIR = ROOT / "analysis" / "results" / "part_a"
+    OUT_DIR = ROOT / "results" / "part_a"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     return MEAS_DIR, OUT_DIR
 
@@ -292,13 +292,27 @@ def _tc_inf(fit_functions, np, odr_fit, savgol_filter, sigma_T_sampling):
         sigma_smooth = 0.5 * (max(peaks) - min(peaks)) if len(peaks) > 1 else 0.0
 
         sigma_T = sigma_T_sampling(T)
-        half = 5
-        lo, hi = max(0, idx_main - half), min(len(T), idx_main + half + 1)
+        # Fit-window: keep only the genuinely quadratic top of the peak.
+        # The Taylor expansion of any smooth peak is parabolic to leading
+        # order — but only near the maximum. By half-max you're already
+        # in the shoulders where higher-order terms dominate, which flattens
+        # the fit and biases the vertex. Threshold at 0.8·peak picks the
+        # top ~20% of the bump, the regime where the quadratic dominates.
+        # Width still scales with the peak (broad runs get more leverage),
+        # falling back to ±5 samples if too few points qualify.
+        peak_y = float(dR_main[idx_main])
+        hwhm_mask = dR_main >= 0.8 * peak_y
+        if hwhm_mask.sum() < 5:
+            lo, hi = max(0, idx_main - 5), min(len(T), idx_main + 5 + 1)
+            hwhm_mask = np.zeros_like(dR_main, dtype=bool)
+            hwhm_mask[lo:hi] = True
         T_peak = float(T[idx_main])
         sigma_peak = 0.0
         chi2_dof = float("nan")
-        if hi - lo >= 4:
-            T_fit, y_fit = T[lo:hi], dR_main[lo:hi]
+        # Index range for the high-pass noise estimator (same window).
+        lo, hi = int(np.argmax(hwhm_mask)), int(len(hwhm_mask) - np.argmax(hwhm_mask[::-1]))
+        if hwhm_mask.sum() >= 4:
+            T_fit, y_fit = T[hwhm_mask], dR_main[hwhm_mask]
             # Per-point σ on dR/dT from a high-pass noise estimate:
             # std(dR_main - dR_wide) over the peak window. Signal-independent
             # — captures fluctuations not absorbed by smoothing.
@@ -419,7 +433,7 @@ def _trace_helpers(normal_resistance, np, savgol_filter, sigma_R, sigma_T_sampli
     error band on the upper R(T) panel).
     """
 
-    def trace(df, window=21, parabola_half=5):
+    def trace(df, window=21):
         T = df["temperature_K"].to_numpy()
         R = df["resistance_ohm"].to_numpy()
         V = df["voltage_V"].to_numpy()
@@ -441,15 +455,18 @@ def _trace_helpers(normal_resistance, np, savgol_filter, sigma_R, sigma_T_sampli
         dR_uni = savgol_filter(R_uni, w, polyorder=3, deriv=1, delta=dT_uni)
         dR_dT = np.interp(T, T_uni, dR_uni)
 
-        # Parabolic refinement of the dR/dT peak — same procedure as A3 in
-        # _tc_inf, exposed here so the plot can overlay the fit and so the
-        # vline at Tc(max dR/dT) matches the value in tc_summary.
+        # Parabolic refinement of the dR/dT peak — top-20% window, matches A3.
         i_pk = int(np.argmax(dR_dT))
-        lo, hi = max(0, i_pk - parabola_half), min(len(T), i_pk + parabola_half + 1)
+        peak_y = float(dR_dT[i_pk])
+        mask = dR_dT >= 0.8 * peak_y
+        if mask.sum() < 5:
+            lo, hi = max(0, i_pk - 5), min(len(T), i_pk + 5 + 1)
+            mask = np.zeros_like(dR_dT, dtype=bool)
+            mask[lo:hi] = True
         Tc_drdt = float(T[i_pk])
         para_T, para_y = None, None
-        if hi - lo >= 4:
-            T_fit, y_fit = T[lo:hi], dR_dT[lo:hi]
+        if mask.sum() >= 4:
+            T_fit, y_fit = T[mask], dR_dT[mask]
             a, b, c = np.polyfit(T_fit, y_fit, 2)
             if a < 0:  # only meaningful if the parabola has a maximum
                 Tc_drdt = float(-b / (2 * a))
@@ -539,9 +556,9 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
     """
 
     _CRIT_HANDLES = [
-        Line2D([0], [0], color="k", ls="-.", lw=1.0,
+        Line2D([0], [0], color="k", ls=(0, (1, 2)), lw=1.0,
                label=r"$T_c^{\,50\%}$"),
-        Line2D([0], [0], color="k", ls="--", lw=1.0,
+        Line2D([0], [0], color="k", ls=(0, (6, 3)), lw=1.0,
                label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
         Line2D([0], [0], color="k", ls="-",  lw=1.8, marker="v",
                markerfacecolor="k", markeredgecolor="white", markersize=6,
@@ -579,15 +596,10 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
         ax.legend(_handles, _labels, loc="upper left", frameon=False)
 
     def draw(ax_r, ax_d, df, tr, color, marker, label):
-        # PRL-style: open markers in series color, capless error bars,
-        # smoothed line in the same saturated color, faint σ_R band kept
-        # as a low-alpha confidence ribbon under the smoothed curve.
-        ax_r.fill_between(
-            tr["T"],
-            (tr["R"] - tr["R_err"]) * 1e3,
-            (tr["R"] + tr["R_err"]) * 1e3,
-            color=color, alpha=0.20, linewidth=0, zorder=1,
-        )
+        # PRL-style: open markers in series color, capless error bars on
+        # each raw point, smoothed line in the same saturated color.
+        # No fill_between band — per-point errorbars already carry σ_R, and
+        # a band on raw scatter is what reviewers flag as redundant.
         ax_r.errorbar(
             tr["T"], tr["R"] * 1e3,
             xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
@@ -605,8 +617,8 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
         )
         # Tc reference lines: thin, low alpha — guides, not data.
         # Two distinct dash patterns to tell the methods apart at small size.
-        ax_r.axvline(tr["Tc50"], color=color, ls="-.", lw=0.9, alpha=0.65)
-        ax_r.axvline(tr["Tc"],   color=color, ls="--", lw=0.9, alpha=0.65)
+        ax_r.axvline(tr["Tc50"], color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
+        ax_r.axvline(tr["Tc"],   color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
         ax_d.plot(tr["T"], tr["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.75)
         if tr["parabola_T"] is not None:
             ax_d.plot(
@@ -618,8 +630,8 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
                 [(tr["parabola_dR_dT"] * 1e3).max()],
                 marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
             )
-        ax_d.axvline(tr["Tc50"], color=color, ls="-.", lw=0.9, alpha=0.65)
-        ax_d.axvline(tr["Tc"],   color=color, ls="--", lw=0.9, alpha=0.65)
+        ax_d.axvline(tr["Tc50"], color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
+        ax_d.axvline(tr["Tc"],   color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
 
     return build, draw, legend_with_info
 
