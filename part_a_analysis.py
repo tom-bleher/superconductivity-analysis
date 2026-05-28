@@ -21,11 +21,14 @@ def _md_intro(mo):
     mo.md(r"""
     # Superconductivity — Part A
 
-    $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ superconductor is measured by
-    four-probe resistance while it is cooled and heated.
+    A $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ sample is measured by four-probe
+    resistance as it is cooled through, and heated back across, its
+    superconducting transition.
 
-    Transition occurs where the derivative $\mathrm{d}R/\mathrm{d}T$ peaks, so that:
-    $T_c = T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$.
+    The transition temperature is taken where the resistance falls most
+    steeply — the peak of $\mathrm{d}R/\mathrm{d}T$:
+
+    $$T_c = T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}.$$
     """)
     return
 
@@ -42,12 +45,22 @@ def _imports():
 
     plt.rcParams.update({
         "font.size": 10,
-        "axes.titlesize": 11,
+        "axes.titlesize": 12.5,
+        "axes.titleweight": "regular",
         "axes.labelsize": 10,
         "legend.fontsize": 8.5,
         "mathtext.fontset": "cm",
+        "axes.linewidth": 0.8,
+        "axes.edgecolor": "#444444",
+        "xtick.color": "#444444",
+        "ytick.color": "#444444",
+        "xtick.labelcolor": "black",
+        "ytick.labelcolor": "black",
+        "axes.labelcolor": "black",
+        "text.color": "black",
         "figure.dpi": 200,
         "savefig.dpi": 200,
+        "figure.facecolor": "white",
     })
 
     from taulab.stats import resolution_sigma
@@ -159,18 +172,19 @@ def _md_tc_methods(SAVGOL_MAIN_SPAN_K, SAVGOL_POLYORDER, mo):
     mo.md(rf"""
     ## $T_c$ extraction
 
-    $R(T)$ is interpolated to a uniform $T$ grid, smoothed with a
-    Savitzky-Golay filter, and differentiated analytically. The chosen setting
-    is a ${SAVGOL_MAIN_SPAN_K:g}\,\mathrm{{K}}$ cubic window
-    (`polyorder = {SAVGOL_POLYORDER}`): the smallest tested span that removed
-    large competing derivative peaks without visibly shifting $T_c$.
+    $R(T)$ is resampled onto a uniform $T$ grid, smoothed with a
+    Savitzky–Golay filter, and differentiated analytically. The window is a
+    ${SAVGOL_MAIN_SPAN_K:g}\,\mathrm{{K}}$ cubic span
+    (`polyorder = {SAVGOL_POLYORDER}`) — the narrowest setting that suppresses
+    spurious derivative peaks without shifting $T_c$. The transition is the
+    location of the steepest rise,
 
     $$T_c=\arg\max_T \frac{{\mathrm{{d}}R}}{{\mathrm{{d}}T}}.$$
 
-    The quoted uncertainty is only the local temperature sampling resolution at
-    the selected peak. If the peak is at index $i$,
+    The reported uncertainty is the local temperature sampling resolution at
+    that peak (index $i$):
 
-    $$\sigma_{{T_c}} = \frac{{(T_i - T_{{i-1}}) + (T_{{i+1}} - T_i)}}{{2\sqrt{{12}}}}.$$
+    $$\sigma_{{T_c}} = \frac{{(T_{{i+1}} - T_{{i-1}})}}{{2\sqrt{{12}}}}.$$
     """)
     return
 
@@ -364,26 +378,30 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
     """
 
     _CRIT_HANDLES = [
-        Line2D([0], [0], color="k", ls=(0, (6, 3)), lw=1.0,
+        Line2D([0], [0], color="#444444", ls=(0, (5, 3)), lw=1.0,
                label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
     ]
 
-    def build(_title=None):
+    def build(_title=None, _subtitle=None):
         fig, (ax_r, ax_d) = plt.subplots(
-            2, 1, figsize=(8.6, 6.4), sharex=True,
-            gridspec_kw={"height_ratios": [2.2, 1.0], "hspace": 0.07},
+            2, 1, figsize=(8.0, 6.2), sharex=True,
+            gridspec_kw={"height_ratios": [2.2, 1.0], "hspace": 0.08},
         )
-        ax_r.set_title(
-            r"Resistance vs Temperature for "
-            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
-            pad=10,
-        )
+        if _title:
+            ax_r.set_title(_title, pad=24 if _subtitle else 12, loc="left")
+        if _subtitle:
+            ax_r.text(
+                0.0, 1.02, _subtitle, transform=ax_r.transAxes,
+                ha="left", va="bottom", fontsize=9.5, color="#888888",
+            )
         ax_r.set_ylabel(r"$R$  (m$\Omega$)")
         ax_d.set_xlabel(r"Temperature  $T$  (K)")
         ax_d.set_ylabel(r"$\mathrm{d}R/\mathrm{d}T$  (m$\Omega$/K)")
         for ax in (ax_r, ax_d):
-            ax.grid(True, alpha=0.15, lw=0.5)
-            ax.tick_params(direction="in", top=True, right=True)
+            ax.grid(True, axis="y", alpha=0.12, lw=0.5)
+            ax.tick_params(direction="in", length=3.5, top=False, right=False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
         ax_d.set_xlim(T_MIN - 1, T_MAX + 1)
         ax_d.legend(
             handles=_CRIT_HANDLES, loc="upper right",
@@ -406,26 +424,26 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
         ax_r.errorbar(
             tr["T"], tr["R"] * 1e3,
             xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
-            fmt=marker, ms=4.0, mfc="none", mec=color, mew=0.8,
+            fmt=marker, ms=3.8, mfc="none", mec=color, mew=0.8,
             ecolor=color, elinewidth=0.5, capsize=0,
-            alpha=0.85, zorder=2,
+            alpha=0.7, zorder=2,
         )
         ax_r.plot(
-            tr["T"], tr["R_smoothed"] * 1e3, lw=1.6, color=color, zorder=3,
+            tr["T"], tr["R_smoothed"] * 1e3, lw=1.8, color=color, zorder=3,
             label=(
-                rf"{label}:  "
-                rf"$T_c^{{\,\max}}\!=\!{tc_drdt:.2f}\,$K"
+                rf"{label}  —  "
+                rf"$T_c = {tc_drdt:.2f}\,$K"
             ),
         )
         # Tc reference lines: thin, low alpha — guides, not data.
-        ax_r.axvline(tc_drdt, color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
-        ax_d.plot(tr["T"], tr["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.75)
+        ax_r.axvline(tc_drdt, color=color, ls=(0, (5, 3)), lw=0.9, alpha=0.5, zorder=1)
+        ax_d.plot(tr["T"], tr["dR_dT"] * 1e3, color=color, lw=1.6, alpha=0.8)
         _idx_pk = int(abs(tr["T"] - tc_drdt).argmin())
         ax_d.plot(
             [tr["T"][_idx_pk]], [tr["dR_dT"][_idx_pk] * 1e3],
             marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
         )
-        ax_d.axvline(tc_drdt, color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
+        ax_d.axvline(tc_drdt, color=color, ls=(0, (5, 3)), lw=0.9, alpha=0.5, zorder=1)
 
     return build, draw, legend_with_info
 
@@ -467,8 +485,8 @@ def _make_figure(build, clip, draw, legend_with_info, runs, trace):
                   they're identical whether or not the display is clipped.
     """
 
-    def make_figure(members, styles, key_of, info, clip_range=None):
-        fig, ax_r, ax_d = build()
+    def make_figure(members, styles, key_of, info, title, subtitle=None, clip_range=None):
+        fig, ax_r, ax_d = build(title, subtitle)
         for _mid, _df in members:
             _d = clip(_df, *clip_range) if clip_range else _df
             _color, _marker, _label = styles[key_of(_d.iloc[0])]
@@ -486,7 +504,7 @@ def _make_figure(build, clip, draw, legend_with_info, runs, trace):
             for _ax in (ax_r, ax_d):
                 _ax.set_xlim(clip_range[0] - 0.5, clip_range[1] + 0.5)
         legend_with_info(ax_r, info)
-        fig.subplots_adjust(left=0.10, right=0.97, bottom=0.10, top=0.92)
+        fig.subplots_adjust(left=0.11, right=0.97, bottom=0.10, top=0.89)
         return fig
 
     return (make_figure,)
@@ -530,11 +548,15 @@ def _md_plot_guide(mo, tc_summary):
     mo.md(rf"""
     ## Figure guide
 
-    At 30 mA, heating gives a derivative-peak $T_c$ higher than cooling by
-    ${_lag_30:.2f}\,\mathrm{{K}}$. At 100 mA, the applied-field run is lower
-    than the zero-field run by ${_field_shift:.2f}\,\mathrm{{K}}$. The 240 mA
-    cooling run gives the lowest $T_c$:
-    ${_cool_240["tc_derivative_K"]:.2f}\,\mathrm{{K}}$.
+    Each figure pairs the smoothed $R(T)$ (top) with its derivative (bottom);
+    the dashed line marks $T_c$. Three comparisons stand out:
+
+    - **Thermal hysteresis** — at $30\,\mathrm{{mA}}$, heating sits
+      ${_lag_30:.2f}\,\mathrm{{K}}$ above cooling.
+    - **Applied field** — at $100\,\mathrm{{mA}}$, the field lowers $T_c$ by
+      ${_field_shift:.2f}\,\mathrm{{K}}$.
+    - **Drive current** — the $240\,\mathrm{{mA}}$ cooling run gives the lowest
+      transition, ${_cool_240["tc_derivative_K"]:.2f}\,\mathrm{{K}}$.
     """)
     return
 
@@ -557,7 +579,10 @@ def _heat_cool_plots(
         _range = intersection([measurements[m] for m in _ids])
         _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  $B = 0$"
         _figs.append(make_figure(
-            _members, DIR_STYLES, lambda meta: meta["direction"], _info, _range
+            _members, DIR_STYLES, lambda meta: meta["direction"], _info,
+            "Heating versus cooling",
+            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
+            _range,
         ))
     mo.vstack(_figs) if _figs else None
     return
@@ -582,7 +607,10 @@ def _magnet_plots(
         _range = intersection([measurements[m] for m in _ids])
         _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  {fmt_dir(_d)}"
         _figs.append(make_figure(
-            _members, FIELD_STYLES, lambda meta: meta["field_condition"], _info, _range
+            _members, FIELD_STYLES, lambda meta: meta["field_condition"], _info,
+            "Zero field versus applied field",
+            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
+            _range,
         ))
     mo.vstack(_figs) if _figs else None
     return
@@ -611,7 +639,10 @@ def _solo_plots(
         )
         _figs.append(make_figure(
             [(_mid, measurements[_mid])], DIR_STYLES,
-            lambda meta: meta["direction"], _info, None
+            lambda meta: meta["direction"], _info,
+            "Single transition run",
+            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
+            None,
         ))
     mo.vstack(_figs) if _figs else None
     return
@@ -621,6 +652,8 @@ def _solo_plots(
 def _md_final(mo):
     mo.md(r"""
     ## Summary
+
+    Derivative-peak $T_c$ for every run, with its local-sampling uncertainty.
     """)
     return
 
