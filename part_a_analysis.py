@@ -23,8 +23,8 @@ def _md_intro(mo):
 
     $T_c$ from $R(T)$ sweeps on $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$, two methods:
 
-    - $T_c^{50\%}$ — $T$ at which $R = R_N/2$ (linear interp on smoothed $R$).
-    - $T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$ — peak of $\mathrm{d}R/\mathrm{d}T$, parabolic-vertex refined.
+    - $T_c^{50\%}$ — $T$ at which $R = R_N/2$ (linear interp on raw $R$).
+    - $T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$ — sampled peak of $\mathrm{d}R/\mathrm{d}T$.
 
     Pair comparisons: heat vs. cool (same $I$, $B=0$) and $B=0$ vs. $B\neq 0$ (same $I$, heating).
     """)
@@ -52,11 +52,17 @@ def _imports():
     })
 
     from taulab.stats import resolution_sigma, nsigma
-    from taulab.fits import odr_fit, fit_functions
 
     return (
-        Line2D, Path, fit_functions, mo, np, nsigma, odr_fit, pd, plt,
-        resolution_sigma, savgol_filter,
+        Line2D,
+        Path,
+        mo,
+        np,
+        nsigma,
+        pd,
+        plt,
+        resolution_sigma,
+        savgol_filter,
     )
 
 
@@ -84,9 +90,9 @@ def _instrument(np, resolution_sigma):
       - |I| spans 30–240 mA → auto-switched per point: 200 mA range
         (LSD = 1 µA) for |I| ≤ 0.2 A, else 2 A range (LSD = 10 µA).
 
-    σ_R propagates through R = V/I (partial-derivative quadrature).
-    σ_T combines a symbolic resolution term (CSV display LSD/√12 ≈ 0.3 µK)
-    with the dominant sampling-gap term (5th-percentile gap / √12).
+    σ_R propagates through R = V/I (partial-derivative quadrature). The
+    per-run σ_T helper is used for plot x-error bars and diagnostics; the
+    extracted Tc uncertainties use the local crossing/peak spacing instead.
     """
     V_RANGE, V_LSD = 0.1, 1e-6
     V_RES = resolution_sigma(V_LSD)
@@ -154,7 +160,7 @@ def _md_tc_methods(mo):
     **$R_N$** — median of $R$ in the top decile of $T$.
 
     **$T_c^{50\%}$** — linear interp through $R_N/2$.
-    $$\sigma_{T_c} = \sqrt{\sigma_\text{bracket}^2 + \sigma_\text{baseline}^2 + \sigma_T^2}$$
+    $$\sigma_{T_c} = \sqrt{\sigma_\text{bracket}^2 + \sigma_\text{baseline}^2}$$
 
     - $\sigma_\text{bracket} = \tfrac{1}{2}\,|T_{i+1} - T_i|$ — sample-spacing limit
       on the interpolation bracket.
@@ -163,15 +169,17 @@ def _md_tc_methods(mo):
       the normal state is sampled.
 
     **$T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$** — SG smooth (order 3) on a uniform $T$
-    grid → analytic derivative ($\mathrm{deriv}=1$) → parabolic fit on $\pm 5$ pts
-    around the peak; $T_c$ = vertex $-b/(2a)$.
-    $$\sigma_{T_c} = \sqrt{\sigma_\text{smooth}^2 + \sigma_\text{peak}^2 + \sigma_T^2}$$
+    grid → analytic derivative ($\mathrm{deriv}=1$) → sampled point where
+    $\mathrm{d}R/\mathrm{d}T$ is maximal.
+    $$\sigma_{T_c} = \sqrt{\sigma_\text{smooth}^2 + \sigma_\text{sample}^2}$$
 
     - $\sigma_\text{smooth} = \tfrac{1}{2}(\max - \min)$ of peak position over SG
       windows 5 / 11 / 21 — smoothing-bandwidth sensitivity.
-    - $\sigma_\text{peak}$ — fit uncertainty on the vertex.
+    - $\sigma_\text{sample} = \Delta T_\text{local}/\sqrt{12}$, where
+      $\Delta T_\text{local}$ is the local temperature spacing near the chosen
+      derivative peak.
 
-    **Temperature uncertainty $\sigma_T$** (per-run, applied to both criteria):
+    **Temperature readout shown on plots.** The x-error bars use
     $$\sigma_T = \sqrt{\sigma_{T,\text{res}}^2 + \sigma_{T,\text{samp}}^2}.$$
     $\sigma_{T,\text{res}} = \mathrm{LSD}_T/\sqrt{12}$ with $\mathrm{LSD}_T = 1\,\mu\mathrm{K}$
     from the CSV display precision (symbolic — the raw sensor reading isn't
@@ -182,9 +190,9 @@ def _md_tc_methods(mo):
     Excluded as systematic (cancels in $\Delta T_c$): Pt-sensor absolute
     calibration, $\sim0.3\,\mathrm{K}$ — shifts every $T_c$ identically.
 
-    **Per-point $\sigma_R$** also propagates from the Rigol DM3058 spec
+    **Per-point $\sigma_R$** propagates from the Rigol DM3058 spec
     ($\sigma = \sqrt{\sigma_\text{acc}^2 + \sigma_\text{res}^2}$, $\sigma_\text{res} = \mathrm{LSD}/\sqrt{12}$)
-    and is shown as a shaded band on the $R(T)$ panel. It's tiny in the
+    and is shown as error bars on the $R(T)$ panel. It's tiny in the
     normal state and diverges near $R \to 0$ where $V$ drops to the meter's
     $\sim\!\mu\mathrm{V}$ floor — useful for showing where the data is trustworthy,
     but small enough at mid-transition that it doesn't drive the $T_c$ uncertainty.
@@ -209,11 +217,11 @@ def _rn_helpers(np):
 
 
 @app.cell
-def _tc50(normal_resistance, normal_resistance_triplet, np, sigma_T_sampling):
+def _tc50(normal_resistance, normal_resistance_triplet, np):
     """A2 — Tc(50%) by interpolation through R_N/2.
 
-    σ = quadrature(bracket half-width, baseline spread over R_N at 5/10/20%,
-    per-run sampling σ_T).
+    σ = quadrature(bracket half-width and baseline spread over R_N at
+    5/10/20%).
     """
 
     def _interp(df, R_N):
@@ -236,28 +244,18 @@ def _tc50(normal_resistance, normal_resistance_triplet, np, sigma_T_sampling):
             if not np.isnan(Tc_alt):
                 Tcs.append(Tc_alt)
         sigma_baseline = 0.5 * (max(Tcs) - min(Tcs)) if len(Tcs) > 1 else 0.0
-        sigma_T = sigma_T_sampling(df["temperature_K"].to_numpy())
-        sigma = float(np.sqrt(sigma_bracket**2 + sigma_baseline**2 + sigma_T**2))
+        sigma = float(np.sqrt(sigma_bracket**2 + sigma_baseline**2))
         return Tc, sigma, R_N
 
     return (tc_midpoint,)
 
 
 @app.cell
-def _tc_inf(fit_functions, np, odr_fit, savgol_filter, sigma_T_sampling):
-    """A3 — Tc(max dR/dT) from Savitzky-Golay smoothing + parabolic peak fit.
+def _tc_inf(np, savgol_filter):
+    """A3 — Tc(max dR/dT) from the sampled Savitzky-Golay derivative peak.
 
-    The local parabola is fit by orthogonal-distance regression
-    (`taulab.fits.odr_fit` with `fit_functions.polynomial`, order 2) so that
-    both σ_T (per-run sampling-gap term) and σ_{dR/dT} (high-pass noise
-    estimate) enter the vertex uncertainty. The fit returns covariance for
-    (A0, A1, A2) in y = A0 + A1·x + A2·x²; the vertex x* = -A1/(2·A2)
-    propagates as σ_x* = √(jᵀ Σ j) with j = (0, -1/(2A2), A1/(2A2²)).
-
-    Returns (T_peak, σ, χ²/dof) where σ = quadrature(window-spread,
-    ODR vertex error, per-run σ_T) and χ²/dof comes from the ODR fit
-    against the high-pass noise (≈1 means the peak is well-described by a
-    parabola at the working smoothing).
+    Returns (T_peak, σ), where σ is the quadrature sum of the smoothing-window
+    sensitivity and the local sample-spacing uncertainty.
     """
 
     def _smoothed_deriv(T, R, window):
@@ -271,14 +269,20 @@ def _tc_inf(fit_functions, np, odr_fit, savgol_filter, sigma_T_sampling):
         dR_uni = savgol_filter(R_uni, window, polyorder=3, deriv=1, delta=dT)
         return np.interp(T, T_uni, dR_uni)
 
+    def _local_sample_sigma(T, i):
+        left = abs(T[i] - T[i - 1]) if i > 0 else np.nan
+        right = abs(T[i + 1] - T[i]) if i < len(T) - 1 else np.nan
+        local_spacing = float(np.nanmean([left, right]))
+        return local_spacing / np.sqrt(12)
+
     def tc_inflection(df):
         T = df["temperature_K"].to_numpy()
         R = df["resistance_ohm"].to_numpy()
         if len(T) < 11:
-            return float("nan"), float("nan"), float("nan")
+            return float("nan"), float("nan")
         cap = max(5, (len(T) // 3) | 1)
 
-        peaks, dR_main, idx_main = [], None, None
+        peaks, idx_main = [], None
         for w in (5, 11, 21):
             w_use = min(w, cap)
             dR = _smoothed_deriv(T, R, w_use)
@@ -286,63 +290,15 @@ def _tc_inf(fit_functions, np, odr_fit, savgol_filter, sigma_T_sampling):
                 continue
             i_pk = int(np.argmax(dR))
             peaks.append(float(T[i_pk]))
-            if w == 11 or dR_main is None:
-                dR_main, idx_main = dR, i_pk
+            if w == 11 or idx_main is None:
+                idx_main = i_pk
 
         sigma_smooth = 0.5 * (max(peaks) - min(peaks)) if len(peaks) > 1 else 0.0
 
-        sigma_T = sigma_T_sampling(T)
-        # Fit-window: keep only the genuinely quadratic top of the peak.
-        # The Taylor expansion of any smooth peak is parabolic to leading
-        # order — but only near the maximum. By half-max you're already
-        # in the shoulders where higher-order terms dominate, which flattens
-        # the fit and biases the vertex. Threshold at 0.8·peak picks the
-        # top ~20% of the bump, the regime where the quadratic dominates.
-        # Width still scales with the peak (broad runs get more leverage),
-        # falling back to ±5 samples if too few points qualify.
-        peak_y = float(dR_main[idx_main])
-        hwhm_mask = dR_main >= 0.8 * peak_y
-        if hwhm_mask.sum() < 5:
-            lo, hi = max(0, idx_main - 5), min(len(T), idx_main + 5 + 1)
-            hwhm_mask = np.zeros_like(dR_main, dtype=bool)
-            hwhm_mask[lo:hi] = True
         T_peak = float(T[idx_main])
-        sigma_peak = 0.0
-        chi2_dof = float("nan")
-        # Index range for the high-pass noise estimator (same window).
-        lo, hi = int(np.argmax(hwhm_mask)), int(len(hwhm_mask) - np.argmax(hwhm_mask[::-1]))
-        if hwhm_mask.sum() >= 4:
-            T_fit, y_fit = T[hwhm_mask], dR_main[hwhm_mask]
-            # Per-point σ on dR/dT from a high-pass noise estimate:
-            # std(dR_main - dR_wide) over the peak window. Signal-independent
-            # — captures fluctuations not absorbed by smoothing.
-            w_wide = max(2 * w_use + 1, 31)
-            w_wide = min(w_wide, len(T) if len(T) % 2 == 1 else len(T) - 1)
-            if w_wide % 2 == 0:
-                w_wide -= 1
-            dR_wide = _smoothed_deriv(T, R, w_wide) if w_wide >= 5 else None
-            sigma_y = (
-                float(np.std((dR_main - dR_wide)[lo:hi], ddof=1)) or 1e-12
-                if dR_wide is not None else float(np.std(y_fit, ddof=1)) or 1e-12
-            )
-            sx = np.full_like(T_fit, sigma_T, dtype=float)
-            sy = np.full_like(y_fit,  sigma_y, dtype=float)
-            # taulab.fits.polynomial: y = A0 + A1·x + A2·x²
-            res = odr_fit(
-                fit_functions.polynomial, None,
-                T_fit, sx, y_fit, sy,
-                param_names=["A0", "A1", "A2"],
-            )
-            A0, A1, A2 = res.params
-            cov = res.cov if res.cov is not None else np.zeros((3, 3))
-            T_peak = float(-A1 / (2 * A2))
-            # Jacobian of -A1/(2 A2) wrt (A0, A1, A2):
-            j = np.array([0.0, -1.0 / (2 * A2), A1 / (2 * A2**2)])
-            sigma_peak = float(np.sqrt(max(j @ cov @ j, 0.0)))
-            chi2_dof = float(res.redchi)
-
-        sigma = float(np.sqrt(sigma_smooth**2 + sigma_peak**2 + sigma_T**2))
-        return T_peak, sigma, chi2_dof
+        sigma_sample = _local_sample_sigma(T, idx_main)
+        sigma = float(np.sqrt(sigma_smooth**2 + sigma_sample**2))
+        return T_peak, sigma
 
     return (tc_inflection,)
 
@@ -359,15 +315,13 @@ def _per_run(
 ):
     """Per-measurement Tc table with uncertainties + data-quality columns.
 
-    Beyond the two Tc's: `chi2_dof_dRdT_peak` (parabolic-fit goodness against
-    a high-pass noise estimate — ≈1 when the peak is well-described by a
-    parabola at the working smoothing window, ≫1 when it isn't), and
-    `sigma_R_rel_at_RN` / `sigma_R_rel_at_RN_half` (relative σ_R at the normal
-    state vs. mid-transition — shows where the data quality degrades).
+    Beyond the two Tc's: `sigma_R_rel_at_RN` / `sigma_R_rel_at_RN_half`
+    (relative σ_R at the normal state vs. mid-transition — shows where the
+    data quality degrades).
     """
     def _row_for(_mid, _df):
         _Tc50, _sig50, _R_N = tc_midpoint(_df)
-        _Tc_inf, _sig_inf, _chi2 = tc_inflection(_df)
+        _Tc_inf, _sig_inf = tc_inflection(_df)
         _meta = _df.iloc[0]
         _T = _df["temperature_K"].to_numpy()
         _R = _df["resistance_ohm"].to_numpy()
@@ -406,7 +360,6 @@ def _per_run(
             tc_50_err_K=_sig50,
             tc_inflection_K=_Tc_inf,
             tc_dRdT_err_K=_sig_inf,
-            chi2_dof_dRdT_peak=_chi2,
             sigma_T_sampling_K=sigma_T_sampling(_T),
             sigma_R_rel_at_RN=_sR_rel_RN,
             sigma_R_rel_at_RN_half=_sR_rel_mid,
@@ -425,15 +378,22 @@ def _per_run(
 
 
 @app.cell
-def _trace_helpers(normal_resistance, np, savgol_filter, sigma_R, sigma_T_sampling):
+def _trace_helpers(
+    np,
+    savgol_filter,
+    sigma_R,
+    sigma_T_sampling,
+    tc_inflection,
+    tc_midpoint,
+):
     """Smoothed R(T) + dR/dT trace, in the style of `plot_heat_cool_overlay.py`.
 
     Returns a dict per measurement: smoothed $R$, analytic $\\mathrm{d}R/\\mathrm{d}T$,
-    both Tc values, the parabola at the peak, and per-point σ_R (used as an
-    error band on the upper R(T) panel).
+    both Tc values, and per-point σ_R (used as error bars on the upper R(T)
+    panel).
     """
 
-    def trace(df, window=21):
+    def trace(df, window=11):
         T = df["temperature_K"].to_numpy()
         R = df["resistance_ohm"].to_numpy()
         V = df["voltage_V"].to_numpy()
@@ -455,41 +415,13 @@ def _trace_helpers(normal_resistance, np, savgol_filter, sigma_R, sigma_T_sampli
         dR_uni = savgol_filter(R_uni, w, polyorder=3, deriv=1, delta=dT_uni)
         dR_dT = np.interp(T, T_uni, dR_uni)
 
-        # Parabolic refinement of the dR/dT peak — top-20% window, matches A3.
-        i_pk = int(np.argmax(dR_dT))
-        peak_y = float(dR_dT[i_pk])
-        mask = dR_dT >= 0.8 * peak_y
-        if mask.sum() < 5:
-            lo, hi = max(0, i_pk - 5), min(len(T), i_pk + 5 + 1)
-            mask = np.zeros_like(dR_dT, dtype=bool)
-            mask[lo:hi] = True
-        Tc_drdt = float(T[i_pk])
-        para_T, para_y = None, None
-        if mask.sum() >= 4:
-            T_fit, y_fit = T[mask], dR_dT[mask]
-            a, b, c = np.polyfit(T_fit, y_fit, 2)
-            if a < 0:  # only meaningful if the parabola has a maximum
-                Tc_drdt = float(-b / (2 * a))
-                para_T = np.linspace(T_fit.min(), T_fit.max(), 100)
-                para_y = a * para_T**2 + b * para_T + c
-
-        # Tc(50%) by interpolation through R_N/2 on the smoothed curve so the
-        # crossing isn't biased by single-point noise.
-        R_N = normal_resistance(df, 0.10)
-        target = R_N / 2.0
-        Tc50 = float("nan")
-        for i in range(len(R_s) - 1):
-            if (R_s[i] - target) * (R_s[i + 1] - target) <= 0 and R_s[i + 1] != R_s[i]:
-                Tc50 = float(
-                    T[i] + (target - R_s[i]) * (T[i + 1] - T[i]) / (R_s[i + 1] - R_s[i])
-                )
-                break
+        Tc50, _, R_N = tc_midpoint(df)
+        Tc_drdt, _ = tc_inflection(df)
 
         return dict(
             T=T, R=R, R_err=R_err, T_err=T_err,
             R_smoothed=R_s, dR_dT=dR_dT,
             Tc=Tc_drdt, Tc50=Tc50, R_N=R_N,
-            parabola_T=para_T, parabola_dR_dT=para_y,
         )
 
     return (trace,)
@@ -560,9 +492,6 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
                label=r"$T_c^{\,50\%}$"),
         Line2D([0], [0], color="k", ls=(0, (6, 3)), lw=1.0,
                label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
-        Line2D([0], [0], color="k", ls="-",  lw=1.8, marker="v",
-               markerfacecolor="k", markeredgecolor="white", markersize=6,
-               label=r"parabolic fit"),
     ]
 
     def build(_title=None):
@@ -620,16 +549,11 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
         ax_r.axvline(tr["Tc50"], color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
         ax_r.axvline(tr["Tc"],   color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
         ax_d.plot(tr["T"], tr["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.75)
-        if tr["parabola_T"] is not None:
-            ax_d.plot(
-                tr["parabola_T"], tr["parabola_dR_dT"] * 1e3,
-                color=color, lw=1.8, ls="-", alpha=1.0, zorder=3,
-            )
-            ax_d.plot(
-                [tr["Tc"]],
-                [(tr["parabola_dR_dT"] * 1e3).max()],
-                marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
-            )
+        _idx_pk = int(abs(tr["T"] - tr["Tc"]).argmin())
+        ax_d.plot(
+            [tr["Tc"]], [tr["dR_dT"][_idx_pk] * 1e3],
+            marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
+        )
         ax_d.axvline(tr["Tc50"], color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
         ax_d.axvline(tr["Tc"],   color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
 
