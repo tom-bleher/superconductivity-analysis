@@ -21,17 +21,11 @@ def _md_intro(mo):
     mo.md(r"""
     # Superconductivity — Part A
 
-    Goal: characterize the resistive superconducting transition of
-    $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ and compare how it changes with sweep
-    direction, applied field, and sample current.
+    $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ superconductor is measured by
+    four-probe resistance while it is cooled and heated.
 
-    Primary descriptors come from one model-free crossing primitive:
-    onset ($R=0.9R_N$), midpoint ($T_c^{50\%}$, $R=0.5R_N$), zero
-    ($R=0.1R_N$), and the 10--90% transition width. The derivative peak
-    $T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$ is reported alongside the midpoint
-    as a shape-sensitive companion estimate.
-
-    Pair comparisons: heat vs. cool (same $I$, $B=0$) and $B=0$ vs. $B\neq 0$ (same $I$, heating).
+    Transition occurs where the derivative $\mathrm{d}R/\mathrm{d}T$ peaks, so that:
+    $T_c = T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$.
     """)
     return
 
@@ -56,9 +50,9 @@ def _imports():
         "savefig.dpi": 200,
     })
 
-    from taulab.stats import nsigma, resolution_sigma
+    from taulab.stats import resolution_sigma
 
-    return Line2D, Path, mo, np, nsigma, pd, plt, resolution_sigma, savgol_filter
+    return Line2D, Path, mo, np, pd, plt, resolution_sigma, savgol_filter
 
 
 @app.cell
@@ -73,10 +67,9 @@ def _paths(Path):
 
 @app.cell
 def _constants():
-    CROSSING_LEVELS = {"onset": 0.90, "midpoint": 0.50, "zero": 0.10}
-    NORMAL_RESISTANCE_FRACS = (0.05, 0.10, 0.20)
-    SAVGOL_SPANS_K = (2.0, 3.0, 4.0)
-    return CROSSING_LEVELS, NORMAL_RESISTANCE_FRACS, SAVGOL_SPANS_K
+    SAVGOL_MAIN_SPAN_K = 3.75
+    SAVGOL_POLYORDER = 3
+    return SAVGOL_MAIN_SPAN_K, SAVGOL_POLYORDER
 
 
 @app.cell
@@ -95,7 +88,7 @@ def _instrument(np, resolution_sigma):
 
     σ_R propagates through R = V/I (partial-derivative quadrature). The
     per-run σ_T helper is used for plot x-error bars and diagnostics; the
-    extracted Tc uncertainties use the local crossing/peak spacing instead.
+    extracted Tc uncertainties use the local derivative-peak spacing instead.
     """
     V_RANGE, V_LSD = 0.1, 1e-6
     V_RES = resolution_sigma(V_LSD)
@@ -162,76 +155,24 @@ def _load(MEAS_DIR, pd):
 
 
 @app.cell
-def _md_tc_methods(mo):
-    mo.md(r"""
+def _md_tc_methods(SAVGOL_MAIN_SPAN_K, SAVGOL_POLYORDER, mo):
+    mo.md(rf"""
     ## $T_c$ extraction
 
-    First define the normal resistance $R_N$ as the median $R$ in the highest
-    10% of sampled temperatures. Then use the same linear crossing primitive
-    for the normalized transition features: onset ($0.9R_N$), midpoint
-    ($T_c^{50\%}$, $0.5R_N$), and zero ($0.1R_N$). The midpoint is the
-    preferred transition descriptor because it is model-free and tied directly
-    to the measured resistance scale.
+    $R(T)$ is interpolated to a uniform $T$ grid, smoothed with a
+    Savitzky-Golay filter, and differentiated analytically. The chosen setting
+    is a ${SAVGOL_MAIN_SPAN_K:g}\,\mathrm{{K}}$ cubic window
+    (`polyorder = {SAVGOL_POLYORDER}`): the smallest tested span that removed
+    large competing derivative peaks without visibly shifting $T_c$.
 
-    Its uncertainty combines the local interpolation bracket with baseline
-    sensitivity:
+    $$T_c=\arg\max_T \frac{{\mathrm{{d}}R}}{{\mathrm{{d}}T}}.$$
 
-    $$\sigma_{50\%}^2
-      = \sigma_\text{bracket}^2 + \sigma_\text{baseline}^2.$$
+    The quoted uncertainty is only the local temperature sampling resolution at
+    the selected peak. If the peak is at index $i$,
 
-    Here $\sigma_\text{bracket}$ is half the temperature spacing around the
-    crossing, and $\sigma_\text{baseline}$ is half the spread obtained by
-    recomputing $R_N$ from the top 5%, 10%, and 20% of the sweep.
-
-    The derivative estimate $T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$ is also
-    reported: it is the sampled peak of a Savitzky--Golay derivative on a
-    uniform $T$ grid. Its uncertainty combines local sample spacing with
-    sensitivity to the smoothing width (2, 3, and 4 K). The table includes
-    $N_\sigma$ between the two estimates; visible offsets are interpreted as
-    transition asymmetry or broadening rather than a replacement for the
-    normalized midpoint.
-
-    Plot error bars show per-point $\sigma_R$ from the Rigol DM3058 voltage and
-    current specs and per-point $\sigma_T$ from local sample spacing. The
-    absolute Pt-sensor calibration uncertainty ($\sim0.3$ K) is not included in
-    relative comparisons because it shifts all transition temperatures together.
+    $$\sigma_{{T_c}} = \frac{{(T_i - T_{{i-1}}) + (T_{{i+1}} - T_i)}}{{2\sqrt{{12}}}}.$$
     """)
     return
-
-
-@app.cell
-def _normal_resistance(np):
-    """A1 — R_N from the median of the highest-T decile."""
-
-    def normal_resistance(df, top_frac=0.10):
-        n = len(df)
-        k = max(3, int(round(n * top_frac)))
-        top = df.nlargest(k, "temperature_K")
-        return float(np.median(top["resistance_ohm"]))
-
-    return (normal_resistance,)
-
-
-@app.cell
-def _crossing_helper(np):
-    """The single model-free primitive: linear interp to where y crosses a level.
-
-    Used for every normalized transition feature: 90%, 50%, and 10% of R_N.
-    Returns (T_cross, half-bracket), where half-bracket = ½|T_{i+1}-T_i| is the
-    sample-spacing limit on where the crossing sits.
-    """
-
-    def crossing(T, y, level):
-        T, y = np.asarray(T), np.asarray(y)
-        for i in range(len(y) - 1):
-            ya, yb = y[i], y[i + 1]
-            if (ya - level) * (yb - level) <= 0 and yb != ya:
-                Ta, Tb = T[i], T[i + 1]
-                Tc = Ta + (level - ya) * (Tb - Ta) / (yb - ya)
-                return float(Tc), float(0.5 * abs(Tb - Ta))
-        return float("nan"), float("nan")
-
-    return (crossing,)
 
 
 @app.cell
@@ -249,7 +190,7 @@ def _savgol_helpers(np, savgol_filter):
         max_w = n if n % 2 else n - 1
         return min(w, max_w)
 
-    def savgol_trace(T, R, span_K=3.0, polyorder=3):
+    def savgol_trace(T, R, span_K, polyorder):
         T, R = np.asarray(T, dtype=float), np.asarray(R, dtype=float)
         if len(T) < polyorder + 2:
             return R, np.full_like(R, np.nan)
@@ -270,14 +211,10 @@ def _savgol_helpers(np, savgol_filter):
 
 @app.cell
 def _analysis(
-    CROSSING_LEVELS,
-    NORMAL_RESISTANCE_FRACS,
-    SAVGOL_SPANS_K,
-    crossing,
+    SAVGOL_MAIN_SPAN_K,
+    SAVGOL_POLYORDER,
     measurements,
-    normal_resistance,
     np,
-    nsigma,
     pd,
     savgol_trace,
 ):
@@ -292,51 +229,25 @@ def _analysis(
         if len(T) < 11:
             return float("nan"), float("nan")
 
-        peaks, idx_main = [], None
-        for span_K in SAVGOL_SPANS_K:
-            _, dR = savgol_trace(T, R, span_K=span_K)
-            if np.isnan(dR).all():
-                continue
-            i_pk = int(np.argmax(dR))
-            peaks.append(float(T[i_pk]))
-            if span_K == 3.0 or idx_main is None:
-                idx_main = i_pk
-
-        if idx_main is None:
+        _, dR = savgol_trace(
+            T,
+            R,
+            span_K=SAVGOL_MAIN_SPAN_K,
+            polyorder=SAVGOL_POLYORDER,
+        )
+        if np.isnan(dR).all():
             return float("nan"), float("nan")
 
-        sigma_smooth = 0.5 * (max(peaks) - min(peaks)) if len(peaks) > 1 else 0.0
-        T_peak = float(T[idx_main])
-        sigma = float(np.sqrt(sigma_smooth**2 + _local_sample_sigma(T, idx_main) ** 2))
+        i_peak = int(np.nanargmax(dR))
+        T_peak = float(T[i_peak])
+        sigma = _local_sample_sigma(T, i_peak)
         return T_peak, sigma
 
     def analyze_run(measurement_id, df):
         meta = df.iloc[0]
         T = df["temperature_K"].to_numpy()
         R = df["resistance_ohm"].to_numpy()
-        R_N = normal_resistance(df)
-        normalized_R = R / R_N
-
-        crosses = {
-            name: crossing(T, normalized_R, level)
-            for name, level in CROSSING_LEVELS.items()
-        }
-        Tc50, sigma_bracket = crosses["midpoint"]
-        baseline_Tc = [
-            crossing(T, R / normal_resistance(df, frac), CROSSING_LEVELS["midpoint"])[0]
-            for frac in NORMAL_RESISTANCE_FRACS
-        ]
-        baseline_Tc = [Tc for Tc in baseline_Tc if not np.isnan(Tc)]
-        sigma_baseline = (
-            0.5 * (max(baseline_Tc) - min(baseline_Tc))
-            if len(baseline_Tc) > 1 else 0.0
-        )
-        sigma_Tc50 = float(np.sqrt(sigma_bracket**2 + sigma_baseline**2))
-
         Tc_derivative, sigma_derivative = _derivative_peak(T, R)
-        onset = crosses["onset"][0]
-        zero = crosses["zero"][0]
-        width = onset - zero if not (np.isnan(onset) or np.isnan(zero)) else float("nan")
 
         return dict(
             measurement_id=measurement_id,
@@ -344,17 +255,8 @@ def _analysis(
             series_resistor=meta["series_resistor"],
             direction=meta["direction"],
             field_condition=meta["field_condition"],
-            normal_resistance_ohm=R_N,
-            tc_midpoint_K=Tc50,
-            tc_50_err_K=sigma_Tc50,
             tc_derivative_K=Tc_derivative,
             tc_derivative_err_K=sigma_derivative,
-            tc_methods_nsigma=float(
-                nsigma((Tc50, sigma_Tc50), (Tc_derivative, sigma_derivative))
-            ),
-            tc_onset_K=onset,
-            tc_zero_K=zero,
-            delta_Tc_width_K=width,
         )
 
     runs = {
@@ -366,11 +268,17 @@ def _analysis(
         .sort_values("measurement_id")
         .reset_index(drop=True)
     )
-    return analyze_run, runs, tc_summary
+    return runs, tc_summary
 
 
 @app.cell
-def _trace_helpers(savgol_trace, sigma_R, sigma_T_local):
+def _trace_helpers(
+    SAVGOL_MAIN_SPAN_K,
+    SAVGOL_POLYORDER,
+    savgol_trace,
+    sigma_R,
+    sigma_T_local,
+):
     """Display-only smoothed R(T) + dR/dT trace for the plotted (possibly
     clipped) T-range. Tc values are *not* computed here — the plots draw the
     compute-once values from `runs`, so the lines match the summary table.
@@ -384,7 +292,12 @@ def _trace_helpers(savgol_trace, sigma_R, sigma_T_local):
         R = df["resistance_ohm"].to_numpy()
         R_err = sigma_R(df["voltage_V"].to_numpy(), df["current_A"].to_numpy())
         T_err = sigma_T_local(T)
-        R_s, dR_dT = savgol_trace(T, R, span_K=3.0)
+        R_s, dR_dT = savgol_trace(
+            T,
+            R,
+            span_K=SAVGOL_MAIN_SPAN_K,
+            polyorder=SAVGOL_POLYORDER,
+        )
 
         return dict(T=T, R=R, R_err=R_err, T_err=T_err, R_smoothed=R_s, dR_dT=dR_dT)
 
@@ -446,14 +359,11 @@ def _fmt():
 def _two_panel(Line2D, T_MAX, T_MIN, plt):
     """Shared two-panel layout: R(T) on top, dR/dT below, common x-axis.
 
-    The bottom-axis legend is reserved for the Tc-criterion line-style key
-    (solid = 50% midpoint, dashed = max dR/dT) so it never collides with
-    the per-trace legend on the top axis.
+    The bottom-axis legend names the single reported Tc criterion so it never
+    collides with the per-trace legend on the top axis.
     """
 
     _CRIT_HANDLES = [
-        Line2D([0], [0], color="k", ls=(0, (1, 2)), lw=1.0,
-               label=r"$T_c^{\,50\%}$"),
         Line2D([0], [0], color="k", ls=(0, (6, 3)), lw=1.0,
                label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
     ]
@@ -488,11 +398,11 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
         _labels.append(info)
         ax.legend(_handles, _labels, loc="upper left", frameon=False)
 
-    def draw(ax_r, ax_d, tr, tc50, tc_drdt, color, marker, label):
+    def draw(ax_r, ax_d, tr, tc_drdt, color, marker, label):
         # PRL-style: open markers in series color, capless error bars on
         # each raw point, smoothed line in the same saturated color.
-        # Tc50 / tc_drdt are the compute-once values from `runs` (not
-        # recomputed on the clipped display data), so lines match the table.
+        # Tc is the compute-once value from `runs` (not recomputed on the
+        # clipped display data), so lines match the table.
         ax_r.errorbar(
             tr["T"], tr["R"] * 1e3,
             xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
@@ -504,13 +414,10 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
             tr["T"], tr["R_smoothed"] * 1e3, lw=1.6, color=color, zorder=3,
             label=(
                 rf"{label}:  "
-                rf"$T_c^{{\,50\%}}\!=\!{tc50:.2f}\,$K,  "
                 rf"$T_c^{{\,\max}}\!=\!{tc_drdt:.2f}\,$K"
             ),
         )
         # Tc reference lines: thin, low alpha — guides, not data.
-        # Two distinct dash patterns to tell the methods apart at small size.
-        ax_r.axvline(tc50,    color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
         ax_r.axvline(tc_drdt, color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
         ax_d.plot(tr["T"], tr["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.75)
         _idx_pk = int(abs(tr["T"] - tc_drdt).argmin())
@@ -518,7 +425,6 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
             [tr["T"][_idx_pk]], [tr["dR_dT"][_idx_pk] * 1e3],
             marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
         )
-        ax_d.axvline(tc50,    color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
         ax_d.axvline(tc_drdt, color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
 
     return build, draw, legend_with_info
@@ -571,7 +477,6 @@ def _make_figure(build, clip, draw, legend_with_info, runs, trace):
                 ax_r,
                 ax_d,
                 trace(_d),
-                _rec["tc_midpoint_K"],
                 _rec["tc_derivative_K"],
                 _color,
                 _marker,
@@ -619,20 +524,17 @@ def _md_plot_guide(mo, tc_summary):
     _field_100 = _one(100.0, "heat", "magnet")
     _cool_240 = _one(240.0, "cool", "no_magnet")
 
-    _lag_30 = _heat_30["tc_midpoint_K"] - _cool_30["tc_midpoint_K"]
-    _field_shift = _heat_100["tc_midpoint_K"] - _field_100["tc_midpoint_K"]
+    _lag_30 = _heat_30["tc_derivative_K"] - _cool_30["tc_derivative_K"]
+    _field_shift = _heat_100["tc_derivative_K"] - _field_100["tc_derivative_K"]
 
     mo.md(rf"""
     ## Figure guide
 
-    Read the figures through $T_c^{{50\%}}$ first, with the derivative peak as
-    a shape check. In the paired runs, heating at 30 mA sits
-    ${_lag_30:.2f}\,\mathrm{{K}}$ above cooling, consistent with thermal lag,
-    while the applied-field 100 mA heating run sits
-    ${_field_shift:.2f}\,\mathrm{{K}}$ below the zero-field run. The unpaired
-    current sweeps should not be overread as a clean monotonic trend; the
-    clearest high-current signature is the broad 240 mA cooling transition
-    ($\Delta T_c={_cool_240["delta_Tc_width_K"]:.2f}\,\mathrm{{K}}$).
+    At 30 mA, heating gives a derivative-peak $T_c$ higher than cooling by
+    ${_lag_30:.2f}\,\mathrm{{K}}$. At 100 mA, the applied-field run is lower
+    than the zero-field run by ${_field_shift:.2f}\,\mathrm{{K}}$. The 240 mA
+    cooling run gives the lowest $T_c$:
+    ${_cool_240["tc_derivative_K"]:.2f}\,\mathrm{{K}}$.
     """)
     return
 
@@ -719,26 +621,13 @@ def _solo_plots(
 def _md_final(mo):
     mo.md(r"""
     ## Summary
-
-    One row per run with both transition-temperature estimates, their
-    method-agreement $N_\sigma$, and the model-free transition markers: onset
-    ($R=0.9R_N$), zero ($R=0.1R_N$), and the 10–90% width
-    $\Delta T_c = T_\text{onset}-T_\text{zero}$. The midpoint remains the
-    preferred descriptor; the derivative peak is reported alongside it because
-    it captures transition shape and broadening.
-
-    An absolute comparison to the Bi-2223 single-crystal onset ($\sim$108 K) is
-    deliberately *not* made here: the polycrystalline resistive midpoint and a
-    single-crystal onset are different sample forms and transition features.
-
-    Numeric results are written to `analysis/results/part_a/tc_summary.csv`.
     """)
     return
 
 
 @app.cell
 def _final_table(pd, tc_summary):
-    """Display table: metadata + both Tc methods + method agreement + width.
+    """Display table: metadata + derivative-peak Tc.
 
     Tc columns are formatted as "val ± σ (rel%)" with rel = σ/|val|·100.
     The CSV written below stays numeric for downstream processing.
@@ -754,12 +643,7 @@ def _final_table(pd, tc_summary):
             "R_s":                _r["series_resistor"],
             "sweep":              _r["direction"],
             "field":              _r["field_condition"],
-            "Tc(50%) [K]":        _fmt(_r["tc_midpoint_K"],   _r["tc_50_err_K"]),
-            "Tc(max dR/dT) [K]":  _fmt(_r["tc_derivative_K"], _r["tc_derivative_err_K"]),
-            "N_σ (methods)":      round(_r["tc_methods_nsigma"], 2),
-            "onset 90% [K]":      round(_r["tc_onset_K"], 2),
-            "zero 10% [K]":       round(_r["tc_zero_K"], 2),
-            "ΔTc width [K]":      round(_r["delta_Tc_width_K"], 2),
+            "Tc [K]":             _fmt(_r["tc_derivative_K"], _r["tc_derivative_err_K"]),
         })
     final_table = pd.DataFrame(_rows)
     return (final_table,)
