@@ -118,36 +118,45 @@ def _instrument(np, resolution_sigma):
                       + (sigma_I(I) / I) ** 2)
         return R * rel
 
-    # Displayed LSD of T in the CSV (≈1 µK from inspecting trailing decimals).
-    # Real-meter LSD isn't recoverable since only the converted-to-K column is
-    # logged; this term is symbolic — dwarfed by σ_T,samp below — but kept in
-    # quadrature for completeness so σ_T = √(σ_res² + σ_samp²) as stated.
-    T_LSD = 1e-6
-    T_RES = resolution_sigma(T_LSD)
+    def sigma_T_local(T):
+        """Per-point T uncertainty from local sample spacing: (½·span)/√12.
 
-    def sigma_T_sampling(T):
-        """Per-run T uncertainty: √((LSD/√12)² + (5th-pct gap/√12)²)."""
-        gaps = np.diff(np.sort(np.asarray(T)))
-        gaps = gaps[gaps > 1e-4]  # drop float-precision artifacts
-        if len(gaps) == 0:
-            return float(T_RES)
-        sigma_samp = float(np.percentile(gaps, 5) / np.sqrt(12))
-        return float(np.sqrt(T_RES**2 + sigma_samp**2))
+        Each point's T is one sample of a continuously drifting sweep; modeling
+        the true value as uniform over the local inter-point gap gives
+        σ_i = Δ_local/√12 with Δ_local = (T[i+1] − T[i−1])/2 (symmetric
+        half-span; one-sided gap at the ends). Returns a per-point array so the
+        x-error bars track the real density — tight where the sweep lingered,
+        wide where it ran fast — and use the same spacing definition as the
+        derivative-peak uncertainty in `tc_inflection`. No instrumental
+        resolution term: only the converted-to-K column is logged, not the raw
+        Pt-sensor reading, so the meter LSD can't be recovered, and even a
+        generous mK-scale value would be dwarfed by this spacing.
+        """
+        T = np.asarray(T, dtype=float)
+        if len(T) < 2:
+            return np.zeros_like(T)
+        span = np.empty_like(T)
+        span[1:-1] = (T[2:] - T[:-2]) / 2.0
+        span[0] = T[1] - T[0]
+        span[-1] = T[-1] - T[-2]
+        return np.abs(span) / np.sqrt(12)
 
-    return sigma_R, sigma_T_sampling
+    return sigma_R, sigma_T_local
 
 
 @app.cell
 def _load(MEAS_DIR, pd):
     """Load every frozen per-run CSV.
 
-    The data files are already sorted, deduplicated, and clipped to the common
-    80-105 K transition window before they enter this notebook.
+    The data files are deduplicated and clipped to the common 80-105 K
+    transition window before they enter this notebook. The load sorts each
+    frame by ascending temperature so the pipeline's monotonic-T invariant is
+    self-enforced (np.interp and savgol_filter produce garbage otherwise).
     """
     T_MIN, T_MAX = 80.0, 105.0
     _meas = {}
     for _path in sorted(MEAS_DIR.glob("partA_*.csv")):
-        _meas[_path.stem] = pd.read_csv(_path)
+        _meas[_path.stem] = pd.read_csv(_path).sort_values("temperature_K").reset_index(drop=True)
     measurements = _meas
     return T_MAX, T_MIN, measurements
 
@@ -179,14 +188,17 @@ def _md_tc_methods(mo):
       $\Delta T_\text{local}$ is the local temperature spacing near the chosen
       derivative peak.
 
-    **Temperature readout shown on plots.** The x-error bars use
-    $$\sigma_T = \sqrt{\sigma_{T,\text{res}}^2 + \sigma_{T,\text{samp}}^2}.$$
-    $\sigma_{T,\text{res}} = \mathrm{LSD}_T/\sqrt{12}$ with $\mathrm{LSD}_T = 1\,\mu\mathrm{K}$
-    from the CSV display precision (symbolic — the raw sensor reading isn't
-    logged, so the meter LSD can't be recovered; this term contributes $\sim0.3\,\mu\mathrm{K}$
-    and is dwarfed by the next). $\sigma_{T,\text{samp}} = (\text{5th-pct gap in }T)/\sqrt{12}$
-    captures "where was $T$ really between two logged samples"; ~10 mK
-    (30 mA / 1 kΩ cool) to ~60 mK (69 mA heat) per run.
+    **Temperature readout shown on plots.** The x-error bars use the per-point
+    local sample spacing,
+    $$\sigma_{T,i} = \frac{1}{\sqrt{12}}\cdot\frac{T_{i+1}-T_{i-1}}{2},$$
+    modeling each point's $T$ as uniform over its local inter-sample gap. This
+    varies along each sweep — tight where the sweep lingered, wide where it ran
+    fast — and matches the spacing definition used for the derivative-peak
+    $T_c$ uncertainty. Typical values near the transition are ~55 mK (100 mA)
+    to ~130 mK (170 mA cool). No instrumental resolution term is included: only
+    the converted-to-K column is logged, not the raw Pt-sensor reading, so the
+    meter LSD can't be recovered — and even a generous mK-scale value would be
+    dwarfed by this spacing.
     Excluded as systematic (cancels in $\Delta T_c$): Pt-sensor absolute
     calibration, $\sim0.3\,\mathrm{K}$ — shifts every $T_c$ identically.
 
@@ -309,7 +321,7 @@ def _per_run(
     np,
     pd,
     sigma_R,
-    sigma_T_sampling,
+    sigma_T_local,
     tc_inflection,
     tc_midpoint,
 ):
@@ -360,7 +372,7 @@ def _per_run(
             tc_50_err_K=_sig50,
             tc_inflection_K=_Tc_inf,
             tc_dRdT_err_K=_sig_inf,
-            sigma_T_sampling_K=sigma_T_sampling(_T),
+            sigma_T_local_med_K=float(np.median(sigma_T_local(_T))),
             sigma_R_rel_at_RN=_sR_rel_RN,
             sigma_R_rel_at_RN_half=_sR_rel_mid,
             tc_onset_K=_T_on,
@@ -382,7 +394,7 @@ def _trace_helpers(
     np,
     savgol_filter,
     sigma_R,
-    sigma_T_sampling,
+    sigma_T_local,
     tc_inflection,
     tc_midpoint,
 ):
@@ -399,7 +411,7 @@ def _trace_helpers(
         V = df["voltage_V"].to_numpy()
         I = df["current_A"].to_numpy()
         R_err = sigma_R(V, I)
-        T_err = sigma_T_sampling(T)
+        T_err = sigma_T_local(T)
         w = min(window, len(R) - (1 - len(R) % 2))
         if w % 2 == 0:
             w -= 1
@@ -708,32 +720,20 @@ def _solo_plots(
 
 
 @app.cell
-def _reference():
-    """Reference T_c to compare every measurement against, via `taulab.stats.nsigma`.
-
-    EDIT these once you have the accepted/literature value (e.g. the
-    Bi-2223 bulk T_c ≈ 110 K, or whatever the lab brief specifies).
-    `T_REF_SIGMA = 0.0` makes it an exact reference; set a nonzero value
-    to fold the reference's own uncertainty into the discrepancy.
-    """
-    # Eltsev et al., arXiv:0909.1628v3 — high-quality Bi-2223 single crystal,
-    # sample #4 (single-step transition): T_c mid-point ≈ 108 K, transition
-    # width (10–90%) ≈ 2 K. No explicit σ; half the transition width is
-    # taken as a conservative reference uncertainty.
-    T_REF       = 108.0
-    T_REF_SIGMA = 1.0
-    return T_REF, T_REF_SIGMA
-
-
-@app.cell
 def _md_final(mo):
     mo.md(r"""
     ## Summary
 
-    One row per run with both $T_c$ estimates and their $N_\sigma$ discrepancy
-    against a reference value (see the `_reference` cell to set it):
+    One row per run with both $T_c$ estimates and an internal
+    method-agreement $N_\sigma$ — does the 50% midpoint estimator agree with
+    the max-$\mathrm{d}R/\mathrm{d}T$ estimator within their own error bars?
 
-    $$N_\sigma \;=\; \frac{|T_c - T_\text{ref}|}{\sqrt{\sigma_{T_c}^2 + \sigma_\text{ref}^2}}.$$
+    $$N_\sigma \;=\; \frac{\left|T_c^{50\%} - T_c^{\max\,\mathrm{d}R/\mathrm{d}T}\right|}{\sqrt{\sigma_{50\%}^2 + \sigma_{\max\,\mathrm{d}R/\mathrm{d}T}^2}}.$$
+
+    An absolute comparison to the Bi-2223 single-crystal onset ($\sim$108 K) is
+    deliberately *not* made here: the polycrystalline resistive midpoint and a
+    single-crystal onset are different sample forms and transition features, so
+    such an $N_\sigma$ would be meaningless rather than informative.
 
     Written to `analysis/results/part_a/tc_summary.csv`.
     """)
@@ -741,10 +741,12 @@ def _md_final(mo):
 
 
 @app.cell
-def _final_table(T_REF, T_REF_SIGMA, nsigma, pd, tc_summary):
-    """Per-run summary: metadata + both Tc methods + N_σ vs reference.
+def _final_table(nsigma, pd, tc_summary):
+    """Per-run summary: metadata + both Tc methods + N_σ between methods.
 
     Tc columns are formatted as "val ± σ (rel%)" with rel = σ/|val|·100.
+    N_σ (methods) tests whether the two estimators agree within their own
+    error bars.
     """
     def _fmt(val, err):
         rel = (err / abs(val) * 100.0) if val else float("nan")
@@ -752,14 +754,6 @@ def _final_table(T_REF, T_REF_SIGMA, nsigma, pd, tc_summary):
 
     _rows = []
     for _, _r in tc_summary.iterrows():
-        _ns_50 = nsigma(
-            (_r["tc_midpoint_K"],   _r["tc_50_err_K"]),
-            (T_REF, T_REF_SIGMA),
-        )
-        _ns_dr = nsigma(
-            (_r["tc_inflection_K"], _r["tc_dRdT_err_K"]),
-            (T_REF, T_REF_SIGMA),
-        )
         _rows.append({
             "I (mA)":             int(_r["sample_current_mA_nominal"]),
             "R_s":                _r["series_resistor"],
@@ -767,8 +761,10 @@ def _final_table(T_REF, T_REF_SIGMA, nsigma, pd, tc_summary):
             "field":              _r["field_condition"],
             "Tc(max dR/dT) [K]":  _fmt(_r["tc_inflection_K"], _r["tc_dRdT_err_K"]),
             "Tc(50%) [K]":        _fmt(_r["tc_midpoint_K"],   _r["tc_50_err_K"]),
-            "N_σ (max dR/dT)":    round(_ns_dr, 2),
-            "N_σ (50%)":          round(_ns_50, 2),
+            "N_σ (methods)":      round(nsigma(
+                (_r["tc_midpoint_K"],   _r["tc_50_err_K"]),
+                (_r["tc_inflection_K"], _r["tc_dRdT_err_K"]),
+            ), 2),
         })
     final_table = pd.DataFrame(_rows)
     return (final_table,)
