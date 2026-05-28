@@ -382,18 +382,13 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
                label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
     ]
 
-    def build(_title=None, _subtitle=None):
+    def build(_title=None):
         fig, (ax_r, ax_d) = plt.subplots(
             2, 1, figsize=(8.0, 6.2), sharex=True,
             gridspec_kw={"height_ratios": [2.2, 1.0], "hspace": 0.08},
         )
         if _title:
-            ax_r.set_title(_title, pad=24 if _subtitle else 12, loc="left")
-        if _subtitle:
-            ax_r.text(
-                0.0, 1.02, _subtitle, transform=ax_r.transAxes,
-                ha="left", va="bottom", fontsize=9.5, color="#888888",
-            )
+            fig.suptitle(_title, x=0.54, y=0.965, fontsize=14, fontweight="medium")
         ax_r.set_ylabel(r"$R$  (m$\Omega$)")
         ax_d.set_xlabel(r"Temperature  $T$  (K)")
         ax_d.set_ylabel(r"$\mathrm{d}R/\mathrm{d}T$  (m$\Omega$/K)")
@@ -485,8 +480,8 @@ def _make_figure(build, clip, draw, legend_with_info, runs, trace):
                   they're identical whether or not the display is clipped.
     """
 
-    def make_figure(members, styles, key_of, info, title, subtitle=None, clip_range=None):
-        fig, ax_r, ax_d = build(title, subtitle)
+    def make_figure(members, styles, key_of, info, title, clip_range=None):
+        fig, ax_r, ax_d = build(title)
         for _mid, _df in members:
             _d = clip(_df, *clip_range) if clip_range else _df
             _color, _marker, _label = styles[key_of(_d.iloc[0])]
@@ -580,8 +575,7 @@ def _heat_cool_plots(
         _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  $B = 0$"
         _figs.append(make_figure(
             _members, DIR_STYLES, lambda meta: meta["direction"], _info,
-            "Heating versus cooling",
-            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
+            "Resistive transition on heating and cooling",
             _range,
         ))
     mo.vstack(_figs) if _figs else None
@@ -608,8 +602,7 @@ def _magnet_plots(
         _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  {fmt_dir(_d)}"
         _figs.append(make_figure(
             _members, FIELD_STYLES, lambda meta: meta["field_condition"], _info,
-            "Zero field versus applied field",
-            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
+            "Resistive transition in zero and applied field",
             _range,
         ))
     mo.vstack(_figs) if _figs else None
@@ -640,8 +633,7 @@ def _solo_plots(
         _figs.append(make_figure(
             [(_mid, measurements[_mid])], DIR_STYLES,
             lambda meta: meta["direction"], _info,
-            "Single transition run",
-            r"$\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$",
+            "Resistive transition",
             None,
         ))
     mo.vstack(_figs) if _figs else None
