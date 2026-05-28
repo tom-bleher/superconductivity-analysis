@@ -1,8 +1,8 @@
-I (mA),R_s,sweep,field,Tc(max dR/dT) [K],Tc(50%) [K],N_σ (methods)
-100,100ohm,heat,magnet,89.52 ± 0.96 (1.07%),89.61 ± 0.08 (0.09%),0.09
-100,100ohm,heat,no_magnet,91.23 ± 0.38 (0.42%),91.65 ± 0.13 (0.14%),1.06
-170,100ohm,cool,no_magnet,89.88 ± 0.25 (0.27%),91.45 ± 0.30 (0.32%),4.07
-240,100ohm,cool,no_magnet,85.52 ± 0.15 (0.18%),88.07 ± 0.28 (0.31%),8.07
-30,1kohm,cool,no_magnet,87.64 ± 0.29 (0.33%),88.93 ± 0.14 (0.16%),3.96
-30,1kohm,heat,no_magnet,89.32 ± 0.17 (0.19%),89.96 ± 0.15 (0.17%),2.82
-69,100ohm,heat,no_magnet,89.85 ± 0.17 (0.19%),90.35 ± 0.16 (0.17%),2.12
+measurement_id,sample_current_mA_nominal,series_resistor,direction,field_condition,tc_derivative_K,tc_derivative_err_K
+partA_100mA_100ohm_heat_magnet,100.0,100ohm,heat,magnet,89.52297500000003,0.05359196138725796
+partA_100mA_100ohm_heat_nomagnet,100.0,100ohm,heat,no_magnet,90.968903,0.07182367252529265
+partA_170mA_100ohm_cool_nomagnet,170.0,100ohm,cool,no_magnet,89.87867600000001,0.1319177526441654
+partA_240mA_100ohm_cool_nomagnet,240.0,100ohm,cool,no_magnet,85.51781500000001,0.04248431955831939
+partA_30mA_1kohm_cool_nomagnet,30.0,1kohm,cool,no_magnet,88.06996200000003,0.05997572331368822
+partA_30mA_1kohm_heat_nomagnet,30.0,1kohm,heat,no_magnet,89.32217700000004,0.08301459713056489
+partA_69mA_100ohm_heat_nomagnet,69.0,100ohm,heat,no_magnet,89.85438500000004,0.08336981188368127

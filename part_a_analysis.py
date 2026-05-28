@@ -21,12 +21,11 @@ def _md_intro(mo):
     mo.md(r"""
     # Superconductivity — Part A
 
-    $T_c$ from $R(T)$ sweeps on $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$, two methods:
+    $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ superconductor is measured by
+    four-probe resistance while it is cooled and heated.
 
-    - $T_c^{50\%}$ — $T$ at which $R = R_N/2$ (linear interp on raw $R$).
-    - $T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$ — sampled peak of $\mathrm{d}R/\mathrm{d}T$.
-
-    Pair comparisons: heat vs. cool (same $I$, $B=0$) and $B=0$ vs. $B\neq 0$ (same $I$, heating).
+    Transition occurs where the derivative $\mathrm{d}R/\mathrm{d}T$ peaks, so that:
+    $T_c = T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$.
     """)
     return
 
@@ -51,19 +50,9 @@ def _imports():
         "savefig.dpi": 200,
     })
 
-    from taulab.stats import resolution_sigma, nsigma
+    from taulab.stats import resolution_sigma
 
-    return (
-        Line2D,
-        Path,
-        mo,
-        np,
-        nsigma,
-        pd,
-        plt,
-        resolution_sigma,
-        savgol_filter,
-    )
+    return Line2D, Path, mo, np, pd, plt, resolution_sigma, savgol_filter
 
 
 @app.cell
@@ -74,6 +63,13 @@ def _paths(Path):
     OUT_DIR = ROOT / "results" / "part_a"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     return MEAS_DIR, OUT_DIR
+
+
+@app.cell
+def _constants():
+    SAVGOL_MAIN_SPAN_K = 3.75
+    SAVGOL_POLYORDER = 3
+    return SAVGOL_MAIN_SPAN_K, SAVGOL_POLYORDER
 
 
 @app.cell
@@ -92,7 +88,7 @@ def _instrument(np, resolution_sigma):
 
     σ_R propagates through R = V/I (partial-derivative quadrature). The
     per-run σ_T helper is used for plot x-error bars and diagnostics; the
-    extracted Tc uncertainties use the local crossing/peak spacing instead.
+    extracted Tc uncertainties use the local derivative-peak spacing instead.
     """
     V_RANGE, V_LSD = 0.1, 1e-6
     V_RES = resolution_sigma(V_LSD)
@@ -113,10 +109,7 @@ def _instrument(np, resolution_sigma):
 
     def sigma_R(V, I):
         V, I = np.asarray(V), np.asarray(I)
-        R = np.abs(V / I)
-        rel = np.sqrt((sigma_V(V) / np.where(V == 0, np.nan, V)) ** 2
-                      + (sigma_I(I) / I) ** 2)
-        return R * rel
+        return np.sqrt((sigma_V(V) / I) ** 2 + (V * sigma_I(I) / I**2) ** 2)
 
     def sigma_T_local(T):
         """Per-point T uncertainty from local sample spacing: (½·span)/√12.
@@ -127,7 +120,7 @@ def _instrument(np, resolution_sigma):
         half-span; one-sided gap at the ends). Returns a per-point array so the
         x-error bars track the real density — tight where the sweep lingered,
         wide where it ran fast — and use the same spacing definition as the
-        derivative-peak uncertainty in `tc_inflection`. No instrumental
+        derivative-peak uncertainty in `derivative_peak`. No instrumental
         resolution term: only the converted-to-K column is logged, not the raw
         Pt-sensor reading, so the meter LSD can't be recovered, and even a
         generous mK-scale value would be dwarfed by this spacing.
@@ -162,279 +155,151 @@ def _load(MEAS_DIR, pd):
 
 
 @app.cell
-def _md_tc_methods(mo):
-    mo.md(r"""
+def _md_tc_methods(SAVGOL_MAIN_SPAN_K, SAVGOL_POLYORDER, mo):
+    mo.md(rf"""
     ## $T_c$ extraction
 
-    **$R_N$** — median of $R$ in the top decile of $T$.
+    $R(T)$ is interpolated to a uniform $T$ grid, smoothed with a
+    Savitzky-Golay filter, and differentiated analytically. The chosen setting
+    is a ${SAVGOL_MAIN_SPAN_K:g}\,\mathrm{{K}}$ cubic window
+    (`polyorder = {SAVGOL_POLYORDER}`): the smallest tested span that removed
+    large competing derivative peaks without visibly shifting $T_c$.
 
-    **$T_c^{50\%}$** — linear interp through $R_N/2$.
-    $$\sigma_{T_c} = \sqrt{\sigma_\text{bracket}^2 + \sigma_\text{baseline}^2}$$
+    $$T_c=\arg\max_T \frac{{\mathrm{{d}}R}}{{\mathrm{{d}}T}}.$$
 
-    - $\sigma_\text{bracket} = \tfrac{1}{2}\,|T_{i+1} - T_i|$ — sample-spacing limit
-      on the interpolation bracket.
-    - $\sigma_\text{baseline} = \tfrac{1}{2}(\max - \min)$ of $T_c$ recomputed with
-      $R_N$ from the top 5 / 10 / 20 % of $T$ — captures sensitivity to where
-      the normal state is sampled.
+    The quoted uncertainty is only the local temperature sampling resolution at
+    the selected peak. If the peak is at index $i$,
 
-    **$T_c^{\max\,\mathrm{d}R/\mathrm{d}T}$** — SG smooth (order 3) on a uniform $T$
-    grid → analytic derivative ($\mathrm{deriv}=1$) → sampled point where
-    $\mathrm{d}R/\mathrm{d}T$ is maximal.
-    $$\sigma_{T_c} = \sqrt{\sigma_\text{smooth}^2 + \sigma_\text{sample}^2}$$
-
-    - $\sigma_\text{smooth} = \tfrac{1}{2}(\max - \min)$ of peak position over SG
-      windows 5 / 11 / 21 — smoothing-bandwidth sensitivity.
-    - $\sigma_\text{sample} = \Delta T_\text{local}/\sqrt{12}$, where
-      $\Delta T_\text{local}$ is the local temperature spacing near the chosen
-      derivative peak.
-
-    **Temperature readout shown on plots.** The x-error bars use the per-point
-    local sample spacing,
-    $$\sigma_{T,i} = \frac{1}{\sqrt{12}}\cdot\frac{T_{i+1}-T_{i-1}}{2},$$
-    modeling each point's $T$ as uniform over its local inter-sample gap. This
-    varies along each sweep — tight where the sweep lingered, wide where it ran
-    fast — and matches the spacing definition used for the derivative-peak
-    $T_c$ uncertainty. Typical values near the transition are ~55 mK (100 mA)
-    to ~130 mK (170 mA cool). No instrumental resolution term is included: only
-    the converted-to-K column is logged, not the raw Pt-sensor reading, so the
-    meter LSD can't be recovered — and even a generous mK-scale value would be
-    dwarfed by this spacing.
-    Excluded as systematic (cancels in $\Delta T_c$): Pt-sensor absolute
-    calibration, $\sim0.3\,\mathrm{K}$ — shifts every $T_c$ identically.
-
-    **Per-point $\sigma_R$** propagates from the Rigol DM3058 spec
-    ($\sigma = \sqrt{\sigma_\text{acc}^2 + \sigma_\text{res}^2}$, $\sigma_\text{res} = \mathrm{LSD}/\sqrt{12}$)
-    and is shown as error bars on the $R(T)$ panel. It's tiny in the
-    normal state and diverges near $R \to 0$ where $V$ drops to the meter's
-    $\sim\!\mu\mathrm{V}$ floor — useful for showing where the data is trustworthy,
-    but small enough at mid-transition that it doesn't drive the $T_c$ uncertainty.
+    $$\sigma_{{T_c}} = \frac{{(T_i - T_{{i-1}}) + (T_{{i+1}} - T_i)}}{{2\sqrt{{12}}}}.$$
     """)
     return
 
 
 @app.cell
-def _rn_helpers(np):
-    """A1 — R_N from the median of the highest-T decile."""
+def _savgol_helpers(np, savgol_filter):
+    """Shared Savitzky-Golay smoother on a uniform temperature grid.
 
-    def normal_resistance(df, frac=0.10):
-        n = len(df)
-        k = max(3, int(round(n * frac)))
-        top = df.nlargest(k, "temperature_K")
-        return float(np.median(top["resistance_ohm"]))
-
-    def normal_resistance_triplet(df):
-        return tuple(normal_resistance(df, f) for f in (0.05, 0.10, 0.20))
-
-    return normal_resistance, normal_resistance_triplet
-
-
-@app.cell
-def _tc50(normal_resistance, normal_resistance_triplet, np):
-    """A2 — Tc(50%) by interpolation through R_N/2.
-
-    σ = quadrature(bracket half-width and baseline spread over R_N at
-    5/10/20%).
+    The window is specified in kelvin, not sample count, so runs with different
+    point density get the same physical smoothing scale.
     """
 
-    def _interp(df, R_N):
-        target = R_N / 2.0
-        T = df["temperature_K"].to_numpy()
-        R = df["resistance_ohm"].to_numpy()
-        for i in range(len(R) - 1):
-            Ra, Rb = R[i], R[i + 1]
-            if (Ra - target) * (Rb - target) <= 0 and Rb != Ra:
-                Ta, Tb = T[i], T[i + 1]
-                return float(Ta + (target - Ra) * (Tb - Ta) / (Rb - Ra)), float(0.5 * abs(Tb - Ta))
-        return float("nan"), float("nan")
+    def _window_length(n, dT, span_K, polyorder):
+        w = max(polyorder + 2, int(round(span_K / dT)))
+        if w % 2 == 0:
+            w += 1
+        max_w = n if n % 2 else n - 1
+        return min(w, max_w)
 
-    def tc_midpoint(df):
-        R_N = normal_resistance(df, 0.10)
-        Tc, sigma_bracket = _interp(df, R_N)
-        Tcs = []
-        for R_N_alt in normal_resistance_triplet(df):
-            Tc_alt, _ = _interp(df, R_N_alt)
-            if not np.isnan(Tc_alt):
-                Tcs.append(Tc_alt)
-        sigma_baseline = 0.5 * (max(Tcs) - min(Tcs)) if len(Tcs) > 1 else 0.0
-        sigma = float(np.sqrt(sigma_bracket**2 + sigma_baseline**2))
-        return Tc, sigma, R_N
+    def savgol_trace(T, R, span_K, polyorder):
+        T, R = np.asarray(T, dtype=float), np.asarray(R, dtype=float)
+        if len(T) < polyorder + 2:
+            return R, np.full_like(R, np.nan)
 
-    return (tc_midpoint,)
-
-
-@app.cell
-def _tc_inf(np, savgol_filter):
-    """A3 — Tc(max dR/dT) from the sampled Savitzky-Golay derivative peak.
-
-    Returns (T_peak, σ), where σ is the quadrature sum of the smoothing-window
-    sensitivity and the local sample-spacing uncertainty.
-    """
-
-    def _smoothed_deriv(T, R, window):
-        if window % 2 == 0:
-            window -= 1
-        if window < 5 or window > len(R):
-            return None
         T_uni = np.linspace(T.min(), T.max(), len(T))
         R_uni = np.interp(T_uni, T, R)
         dT = (T_uni[-1] - T_uni[0]) / (len(T_uni) - 1)
-        dR_uni = savgol_filter(R_uni, window, polyorder=3, deriv=1, delta=dT)
-        return np.interp(T, T_uni, dR_uni)
+        w = _window_length(len(T_uni), dT, span_K, polyorder)
+        if w <= polyorder:
+            return R, np.full_like(R, np.nan)
+
+        R_s_uni = savgol_filter(R_uni, w, polyorder=polyorder)
+        dR_uni = savgol_filter(R_uni, w, polyorder=polyorder, deriv=1, delta=dT)
+        return np.interp(T, T_uni, R_s_uni), np.interp(T, T_uni, dR_uni)
+
+    return (savgol_trace,)
+
+
+@app.cell
+def _analysis(
+    SAVGOL_MAIN_SPAN_K,
+    SAVGOL_POLYORDER,
+    measurements,
+    np,
+    pd,
+    savgol_trace,
+):
+    """Analyze each run once and keep that record as the single source of truth."""
 
     def _local_sample_sigma(T, i):
         left = abs(T[i] - T[i - 1]) if i > 0 else np.nan
         right = abs(T[i + 1] - T[i]) if i < len(T) - 1 else np.nan
-        local_spacing = float(np.nanmean([left, right]))
-        return local_spacing / np.sqrt(12)
+        return float(np.nanmean([left, right])) / np.sqrt(12)
 
-    def tc_inflection(df):
-        T = df["temperature_K"].to_numpy()
-        R = df["resistance_ohm"].to_numpy()
+    def _derivative_peak(T, R):
         if len(T) < 11:
             return float("nan"), float("nan")
-        cap = max(5, (len(T) // 3) | 1)
 
-        peaks, idx_main = [], None
-        for w in (5, 11, 21):
-            w_use = min(w, cap)
-            dR = _smoothed_deriv(T, R, w_use)
-            if dR is None:
-                continue
-            i_pk = int(np.argmax(dR))
-            peaks.append(float(T[i_pk]))
-            if w == 11 or idx_main is None:
-                idx_main = i_pk
+        _, dR = savgol_trace(
+            T,
+            R,
+            span_K=SAVGOL_MAIN_SPAN_K,
+            polyorder=SAVGOL_POLYORDER,
+        )
+        if np.isnan(dR).all():
+            return float("nan"), float("nan")
 
-        sigma_smooth = 0.5 * (max(peaks) - min(peaks)) if len(peaks) > 1 else 0.0
-
-        T_peak = float(T[idx_main])
-        sigma_sample = _local_sample_sigma(T, idx_main)
-        sigma = float(np.sqrt(sigma_smooth**2 + sigma_sample**2))
+        i_peak = int(np.nanargmax(dR))
+        T_peak = float(T[i_peak])
+        sigma = _local_sample_sigma(T, i_peak)
         return T_peak, sigma
 
-    return (tc_inflection,)
-
-
-@app.cell
-def _per_run(
-    measurements,
-    np,
-    pd,
-    sigma_R,
-    sigma_T_local,
-    tc_inflection,
-    tc_midpoint,
-):
-    """Per-measurement Tc table with uncertainties + data-quality columns.
-
-    Beyond the two Tc's: `sigma_R_rel_at_RN` / `sigma_R_rel_at_RN_half`
-    (relative σ_R at the normal state vs. mid-transition — shows where the
-    data quality degrades).
-    """
-    def _row_for(_mid, _df):
-        _Tc50, _sig50, _R_N = tc_midpoint(_df)
-        _Tc_inf, _sig_inf = tc_inflection(_df)
-        _meta = _df.iloc[0]
-        _T = _df["temperature_K"].to_numpy()
-        _R = _df["resistance_ohm"].to_numpy()
-        _V = _df["voltage_V"].to_numpy()
-        _I = _df["current_A"].to_numpy()
-
-        def _crossing(_target):
-            for _i in range(len(_R) - 1):
-                if (_R[_i] - _target) * (_R[_i + 1] - _target) <= 0 and _R[_i + 1] != _R[_i]:
-                    return float(
-                        _T[_i]
-                        + (_target - _R[_i]) * (_T[_i + 1] - _T[_i]) / (_R[_i + 1] - _R[_i])
-                    )
-            return float("nan")
-
-        _T_on = _crossing(0.90 * _R_N)
-        _T_zr = _crossing(0.10 * _R_N)
-        _w = _T_on - _T_zr if not (np.isnan(_T_on) or np.isnan(_T_zr)) else float("nan")
-
-        # Data-quality: σ_R/R near the normal state (top decile) and near
-        # mid-transition (bracket of R_N/2). Median over the relevant subset.
-        _sR_rel = sigma_R(_V, _I) / np.maximum(_R, 1e-12)
-        _top_mask = _T >= np.percentile(_T, 90)
-        _mid_mask = (_R >= 0.4 * _R_N) & (_R <= 0.6 * _R_N)
-        _sR_rel_RN = float(np.median(_sR_rel[_top_mask])) if _top_mask.any() else float("nan")
-        _sR_rel_mid = float(np.median(_sR_rel[_mid_mask])) if _mid_mask.any() else float("nan")
+    def analyze_run(measurement_id, df):
+        meta = df.iloc[0]
+        T = df["temperature_K"].to_numpy()
+        R = df["resistance_ohm"].to_numpy()
+        Tc_derivative, sigma_derivative = _derivative_peak(T, R)
 
         return dict(
-            measurement_id=_mid,
-            sample_current_mA_nominal=float(_meta["sample_current_mA_nominal"]),
-            series_resistor=_meta["series_resistor"],
-            direction=_meta["direction"],
-            field_condition=_meta["field_condition"],
-            normal_resistance_ohm=_R_N,
-            tc_midpoint_K=_Tc50,
-            tc_50_err_K=_sig50,
-            tc_inflection_K=_Tc_inf,
-            tc_dRdT_err_K=_sig_inf,
-            sigma_T_local_med_K=float(np.median(sigma_T_local(_T))),
-            sigma_R_rel_at_RN=_sR_rel_RN,
-            sigma_R_rel_at_RN_half=_sR_rel_mid,
-            tc_onset_K=_T_on,
-            tc_zero_K=_T_zr,
-            delta_Tc_width_K=_w,
-            points_used_for_tc=len(_df),
+            measurement_id=measurement_id,
+            sample_current_mA_nominal=float(meta["sample_current_mA_nominal"]),
+            series_resistor=meta["series_resistor"],
+            direction=meta["direction"],
+            field_condition=meta["field_condition"],
+            tc_derivative_K=Tc_derivative,
+            tc_derivative_err_K=sigma_derivative,
         )
 
+    runs = {
+        measurement_id: analyze_run(measurement_id, df)
+        for measurement_id, df in measurements.items()
+    }
     tc_summary = (
-        pd.DataFrame([_row_for(_mid, _df) for _mid, _df in measurements.items()])
+        pd.DataFrame(runs.values())
         .sort_values("measurement_id")
         .reset_index(drop=True)
     )
-    return (tc_summary,)
+    return runs, tc_summary
 
 
 @app.cell
 def _trace_helpers(
-    np,
-    savgol_filter,
+    SAVGOL_MAIN_SPAN_K,
+    SAVGOL_POLYORDER,
+    savgol_trace,
     sigma_R,
     sigma_T_local,
-    tc_inflection,
-    tc_midpoint,
 ):
-    """Smoothed R(T) + dR/dT trace, in the style of `plot_heat_cool_overlay.py`.
+    """Display-only smoothed R(T) + dR/dT trace for the plotted (possibly
+    clipped) T-range. Tc values are *not* computed here — the plots draw the
+    compute-once values from `runs`, so the lines match the summary table.
 
-    Returns a dict per measurement: smoothed $R$, analytic $\\mathrm{d}R/\\mathrm{d}T$,
-    both Tc values, and per-point σ_R (used as error bars on the upper R(T)
-    panel).
+    Returns per-point σ_R/σ_T error arrays, the SG-smoothed $R$, and the
+    analytic $\\mathrm{d}R/\\mathrm{d}T$.
     """
 
-    def trace(df, window=11):
+    def trace(df):
         T = df["temperature_K"].to_numpy()
         R = df["resistance_ohm"].to_numpy()
-        V = df["voltage_V"].to_numpy()
-        I = df["current_A"].to_numpy()
-        R_err = sigma_R(V, I)
+        R_err = sigma_R(df["voltage_V"].to_numpy(), df["current_A"].to_numpy())
         T_err = sigma_T_local(T)
-        w = min(window, len(R) - (1 - len(R) % 2))
-        if w % 2 == 0:
-            w -= 1
-        w = max(w, 5)
-        # Smoothed R on the native grid (for the upper plot).
-        R_s = savgol_filter(R, window_length=w, polyorder=3)
-        # dR/dT via SG's analytic derivative on a uniform resample, then
-        # interpolated back to native T — much smoother than `np.gradient`
-        # of the smoothed series (verified: 6×–740× less jitter).
-        T_uni = np.linspace(T.min(), T.max(), len(T))
-        R_uni = np.interp(T_uni, T, R)
-        dT_uni = (T_uni[-1] - T_uni[0]) / (len(T_uni) - 1)
-        dR_uni = savgol_filter(R_uni, w, polyorder=3, deriv=1, delta=dT_uni)
-        dR_dT = np.interp(T, T_uni, dR_uni)
-
-        Tc50, _, R_N = tc_midpoint(df)
-        Tc_drdt, _ = tc_inflection(df)
-
-        return dict(
-            T=T, R=R, R_err=R_err, T_err=T_err,
-            R_smoothed=R_s, dR_dT=dR_dT,
-            Tc=Tc_drdt, Tc50=Tc50, R_N=R_N,
+        R_s, dR_dT = savgol_trace(
+            T,
+            R,
+            span_K=SAVGOL_MAIN_SPAN_K,
+            polyorder=SAVGOL_POLYORDER,
         )
+
+        return dict(T=T, R=R, R_err=R_err, T_err=T_err, R_smoothed=R_s, dR_dT=dR_dT)
 
     return (trace,)
 
@@ -494,14 +359,11 @@ def _fmt():
 def _two_panel(Line2D, T_MAX, T_MIN, plt):
     """Shared two-panel layout: R(T) on top, dR/dT below, common x-axis.
 
-    The bottom-axis legend is reserved for the Tc-criterion line-style key
-    (solid = 50% midpoint, dashed = max dR/dT) so it never collides with
-    the per-trace legend on the top axis.
+    The bottom-axis legend names the single reported Tc criterion so it never
+    collides with the per-trace legend on the top axis.
     """
 
     _CRIT_HANDLES = [
-        Line2D([0], [0], color="k", ls=(0, (1, 2)), lw=1.0,
-               label=r"$T_c^{\,50\%}$"),
         Line2D([0], [0], color="k", ls=(0, (6, 3)), lw=1.0,
                label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
     ]
@@ -536,11 +398,11 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
         _labels.append(info)
         ax.legend(_handles, _labels, loc="upper left", frameon=False)
 
-    def draw(ax_r, ax_d, df, tr, color, marker, label):
+    def draw(ax_r, ax_d, tr, tc_drdt, color, marker, label):
         # PRL-style: open markers in series color, capless error bars on
         # each raw point, smoothed line in the same saturated color.
-        # No fill_between band — per-point errorbars already carry σ_R, and
-        # a band on raw scatter is what reviewers flag as redundant.
+        # Tc is the compute-once value from `runs` (not recomputed on the
+        # clipped display data), so lines match the table.
         ax_r.errorbar(
             tr["T"], tr["R"] * 1e3,
             xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
@@ -552,22 +414,18 @@ def _two_panel(Line2D, T_MAX, T_MIN, plt):
             tr["T"], tr["R_smoothed"] * 1e3, lw=1.6, color=color, zorder=3,
             label=(
                 rf"{label}:  "
-                rf"$T_c^{{\,50\%}}\!=\!{tr['Tc50']:.2f}\,$K,  "
-                rf"$T_c^{{\,\max}}\!=\!{tr['Tc']:.2f}\,$K"
+                rf"$T_c^{{\,\max}}\!=\!{tc_drdt:.2f}\,$K"
             ),
         )
         # Tc reference lines: thin, low alpha — guides, not data.
-        # Two distinct dash patterns to tell the methods apart at small size.
-        ax_r.axvline(tr["Tc50"], color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
-        ax_r.axvline(tr["Tc"],   color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
+        ax_r.axvline(tc_drdt, color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
         ax_d.plot(tr["T"], tr["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.75)
-        _idx_pk = int(abs(tr["T"] - tr["Tc"]).argmin())
+        _idx_pk = int(abs(tr["T"] - tc_drdt).argmin())
         ax_d.plot(
-            [tr["Tc"]], [tr["dR_dT"][_idx_pk] * 1e3],
+            [tr["T"][_idx_pk]], [tr["dR_dT"][_idx_pk] * 1e3],
             marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
         )
-        ax_d.axvline(tr["Tc50"], color=color, ls=(0, (1, 2)), lw=1.0, alpha=0.8)
-        ax_d.axvline(tr["Tc"],   color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
+        ax_d.axvline(tc_drdt, color=color, ls=(0, (6, 3)), lw=1.0, alpha=0.8)
 
     return build, draw, legend_with_info
 
@@ -597,124 +455,164 @@ def _pair_clip():
 
 
 @app.cell
+def _make_figure(build, clip, draw, legend_with_info, runs, trace):
+    """One two-panel figure for any group of runs — the single body shared by
+    the heat/cool, magnet, and solo plot cells.
+
+    `members`   : list of (measurement_id, df).
+    `styles`    : {style_key: (color, marker, label)}.
+    `key_of`    : meta-row → style_key (e.g. direction or field_condition).
+    `clip_range`: (T_lo, T_hi) to clip display data to the pair overlap, or
+                  None for full range (solo). Tc lines come from `runs`, so
+                  they're identical whether or not the display is clipped.
+    """
+
+    def make_figure(members, styles, key_of, info, clip_range=None):
+        fig, ax_r, ax_d = build()
+        for _mid, _df in members:
+            _d = clip(_df, *clip_range) if clip_range else _df
+            _color, _marker, _label = styles[key_of(_d.iloc[0])]
+            _rec = runs[_mid]
+            draw(
+                ax_r,
+                ax_d,
+                trace(_d),
+                _rec["tc_derivative_K"],
+                _color,
+                _marker,
+                _label,
+            )
+        if clip_range:
+            for _ax in (ax_r, ax_d):
+                _ax.set_xlim(clip_range[0] - 0.5, clip_range[1] + 0.5)
+        legend_with_info(ax_r, info)
+        fig.subplots_adjust(left=0.10, right=0.97, bottom=0.10, top=0.92)
+        return fig
+
+    return (make_figure,)
+
+
+@app.cell
+def _dir_styles():
+    """Shared style maps. Heat/cool keyed by direction (red/blue); magnet
+    keyed by field_condition (green/purple) so a field pair isn't mistaken
+    for a temperature-direction comparison."""
+    DIR_STYLES = {
+        "cool": ("#1f77b4", "s", "cooling"),
+        "heat": ("#d62728", "o", "heating"),
+    }
+    FIELD_STYLES = {
+        "no_magnet": ("#2ca02c", "s", r"$B = 0$"),
+        "magnet":    ("#9467bd", "o", r"$B \neq 0$"),
+    }
+    return DIR_STYLES, FIELD_STYLES
+
+
+@app.cell
+def _md_plot_guide(mo, tc_summary):
+    def _one(current_mA, direction, field):
+        _row = tc_summary[
+            (tc_summary["sample_current_mA_nominal"] == current_mA)
+            & (tc_summary["direction"] == direction)
+            & (tc_summary["field_condition"] == field)
+        ]
+        return _row.iloc[0]
+
+    _heat_30 = _one(30.0, "heat", "no_magnet")
+    _cool_30 = _one(30.0, "cool", "no_magnet")
+    _heat_100 = _one(100.0, "heat", "no_magnet")
+    _field_100 = _one(100.0, "heat", "magnet")
+    _cool_240 = _one(240.0, "cool", "no_magnet")
+
+    _lag_30 = _heat_30["tc_derivative_K"] - _cool_30["tc_derivative_K"]
+    _field_shift = _heat_100["tc_derivative_K"] - _field_100["tc_derivative_K"]
+
+    mo.md(rf"""
+    ## Figure guide
+
+    At 30 mA, heating gives a derivative-peak $T_c$ higher than cooling by
+    ${_lag_30:.2f}\,\mathrm{{K}}$. At 100 mA, the applied-field run is lower
+    than the zero-field run by ${_field_shift:.2f}\,\mathrm{{K}}$. The 240 mA
+    cooling run gives the lowest $T_c$:
+    ${_cool_240["tc_derivative_K"]:.2f}\,\mathrm{{K}}$.
+    """)
+    return
+
+
+@app.cell
 def _heat_cool_plots(
-    build,
-    clip,
-    draw,
+    DIR_STYLES,
     fmt_I,
     fmt_R,
     heat_cool_groups,
     intersection,
-    legend_with_info,
+    make_figure,
     measurements,
     mo,
-    trace,
 ):
     """One figure per heat/cool pair (no-magnet runs only)."""
     _figs = []
     for (_I, _R), _ids in sorted(heat_cool_groups.items()):
-        _pair = [measurements[m] for m in _ids]
-        _T_lo, _T_hi = intersection(_pair)
+        _members = [(m, measurements[m]) for m in _ids]
+        _range = intersection([measurements[m] for m in _ids])
         _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  $B = 0$"
-        _fig, _ax_r, _ax_d = build("heating vs cooling")
-        _styles = {
-            "cool": ("#1f77b4", "s", "cooling"),
-            "heat": ("#d62728", "o", "heating"),
-        }
-        for _df_full in _pair:
-            _df = clip(_df_full, _T_lo, _T_hi)
-            _dir = _df.iloc[0]["direction"]
-            _color, _marker, _label = _styles[_dir]
-            draw(_ax_r, _ax_d, _df, trace(_df), _color, _marker, _label)
-        for _ax in (_ax_r, _ax_d):
-            _ax.set_xlim(_T_lo - 0.5, _T_hi + 0.5)
-        legend_with_info(_ax_r, _info)
-        _fig.tight_layout()
-        _figs.append(_fig)
+        _figs.append(make_figure(
+            _members, DIR_STYLES, lambda meta: meta["direction"], _info, _range
+        ))
     mo.vstack(_figs) if _figs else None
     return
 
 
 @app.cell
 def _magnet_plots(
-    build,
-    clip,
-    draw,
+    FIELD_STYLES,
     fmt_I,
     fmt_R,
     fmt_dir,
     intersection,
-    legend_with_info,
     magnet_groups,
+    make_figure,
     measurements,
     mo,
-    trace,
 ):
     """One figure per magnet-vs-no-magnet pair."""
     _figs = []
     for (_I, _R, _d), _ids in sorted(magnet_groups.items()):
-        _pair = [measurements[m] for m in _ids]
-        _T_lo, _T_hi = intersection(_pair)
+        _members = [(m, measurements[m]) for m in _ids]
+        _range = intersection([measurements[m] for m in _ids])
         _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  {fmt_dir(_d)}"
-        _fig, _ax_r, _ax_d = build("applied field vs zero field")
-        # Distinct palette from heat/cool (red/blue) so the pair isn't
-        # mistaken for a temperature-direction comparison.
-        _styles = {
-            "no_magnet": ("#2ca02c", "s", r"$B = 0$"),       # green
-            "magnet":    ("#9467bd", "o", r"$B \neq 0$"),    # purple
-        }
-        for _df_full in _pair:
-            _df = clip(_df_full, _T_lo, _T_hi)
-            _field = _df.iloc[0]["field_condition"]
-            _color, _marker, _label = _styles[_field]
-            draw(_ax_r, _ax_d, _df, trace(_df), _color, _marker, _label)
-        for _ax in (_ax_r, _ax_d):
-            _ax.set_xlim(_T_lo - 0.5, _T_hi + 0.5)
-        legend_with_info(_ax_r, _info)
-        _fig.tight_layout()
-        _figs.append(_fig)
+        _figs.append(make_figure(
+            _members, FIELD_STYLES, lambda meta: meta["field_condition"], _info, _range
+        ))
     mo.vstack(_figs) if _figs else None
     return
 
 
 @app.cell
 def _solo_plots(
-    build,
-    draw,
+    DIR_STYLES,
     fmt_I,
     fmt_R,
     fmt_dir,
     fmt_field,
-    legend_with_info,
+    make_figure,
     measurements,
     mo,
     solo_ids,
-    trace,
 ):
-    """Same two-panel style for runs without a pair — one figure each.
-
-    Colors match the pair plots: heating = red ●, cooling = blue ■.
-    """
-    _styles = {
-        "cool": ("#1f77b4", "s"),
-        "heat": ("#d62728", "o"),
-    }
+    """Same two-panel style for runs without a pair — one figure each."""
     _figs = []
     for _mid in sorted(solo_ids):
-        _df = measurements[_mid]
-        _meta = _df.iloc[0]
-        _dir = _meta["direction"]
+        _meta = measurements[_mid].iloc[0]
         _info = (
             rf"${fmt_I(_meta['sample_current_mA_nominal'])}$,  "
             rf"${fmt_R(_meta['series_resistor'])}$,  "
-            rf"{fmt_dir(_dir)},  ${fmt_field(_meta['field_condition'])}$"
+            rf"{fmt_dir(_meta['direction'])},  ${fmt_field(_meta['field_condition'])}$"
         )
-        _fig, _ax_r, _ax_d = build("single sweep")
-        _color, _marker = _styles[_dir]
-        draw(_ax_r, _ax_d, _df, trace(_df), _color, _marker, fmt_dir(_dir))
-        legend_with_info(_ax_r, _info)
-        _fig.tight_layout()
-        _figs.append(_fig)
+        _figs.append(make_figure(
+            [(_mid, measurements[_mid])], DIR_STYLES,
+            lambda meta: meta["direction"], _info, None
+        ))
     mo.vstack(_figs) if _figs else None
     return
 
@@ -723,30 +621,16 @@ def _solo_plots(
 def _md_final(mo):
     mo.md(r"""
     ## Summary
-
-    One row per run with both $T_c$ estimates and an internal
-    method-agreement $N_\sigma$ — does the 50% midpoint estimator agree with
-    the max-$\mathrm{d}R/\mathrm{d}T$ estimator within their own error bars?
-
-    $$N_\sigma \;=\; \frac{\left|T_c^{50\%} - T_c^{\max\,\mathrm{d}R/\mathrm{d}T}\right|}{\sqrt{\sigma_{50\%}^2 + \sigma_{\max\,\mathrm{d}R/\mathrm{d}T}^2}}.$$
-
-    An absolute comparison to the Bi-2223 single-crystal onset ($\sim$108 K) is
-    deliberately *not* made here: the polycrystalline resistive midpoint and a
-    single-crystal onset are different sample forms and transition features, so
-    such an $N_\sigma$ would be meaningless rather than informative.
-
-    Written to `analysis/results/part_a/tc_summary.csv`.
     """)
     return
 
 
 @app.cell
-def _final_table(nsigma, pd, tc_summary):
-    """Per-run summary: metadata + both Tc methods + N_σ between methods.
+def _final_table(pd, tc_summary):
+    """Display table: metadata + derivative-peak Tc.
 
     Tc columns are formatted as "val ± σ (rel%)" with rel = σ/|val|·100.
-    N_σ (methods) tests whether the two estimators agree within their own
-    error bars.
+    The CSV written below stays numeric for downstream processing.
     """
     def _fmt(val, err):
         rel = (err / abs(val) * 100.0) if val else float("nan")
@@ -759,12 +643,7 @@ def _final_table(nsigma, pd, tc_summary):
             "R_s":                _r["series_resistor"],
             "sweep":              _r["direction"],
             "field":              _r["field_condition"],
-            "Tc(max dR/dT) [K]":  _fmt(_r["tc_inflection_K"], _r["tc_dRdT_err_K"]),
-            "Tc(50%) [K]":        _fmt(_r["tc_midpoint_K"],   _r["tc_50_err_K"]),
-            "N_σ (methods)":      round(nsigma(
-                (_r["tc_midpoint_K"],   _r["tc_50_err_K"]),
-                (_r["tc_inflection_K"], _r["tc_dRdT_err_K"]),
-            ), 2),
+            "Tc [K]":             _fmt(_r["tc_derivative_K"], _r["tc_derivative_err_K"]),
         })
     final_table = pd.DataFrame(_rows)
     return (final_table,)
@@ -777,9 +656,9 @@ def _show_final(final_table):
 
 
 @app.cell
-def _write(OUT_DIR, final_table):
+def _write(OUT_DIR, tc_summary):
     tc_path = OUT_DIR / "tc_summary.csv"
-    final_table.to_csv(tc_path, index=False)
+    tc_summary.to_csv(tc_path, index=False)
     print(f"wrote {tc_path}")
     return
 
