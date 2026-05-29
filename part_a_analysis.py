@@ -172,11 +172,7 @@ def _load(MEAS_DIR, pd):
 
 
 @app.cell
-def _md_tc_methods(
-    SPLINE_SENSITIVITY_TARGETS_MOHM,
-    SPLINE_TARGET_MOHM,
-    mo,
-):
+def _md_tc_methods(SPLINE_SENSITIVITY_TARGETS_MOHM, SPLINE_TARGET_MOHM, mo):
     _target_list = ", ".join(f"{_t:g}" for _t in SPLINE_SENSITIVITY_TARGETS_MOHM)
     mo.md(rf"""
     ## Method
@@ -412,13 +408,7 @@ def _md_fit_diagnostics(mo):
 
 
 @app.cell
-def _spline_diagnostics(
-    SPLINE_TARGET_MOHM,
-    fit_spline,
-    measurements,
-    np,
-    pd,
-):
+def _spline_diagnostics(SPLINE_TARGET_MOHM, fit_spline, measurements, np, pd):
     def _residual_stats(T, R, target_mohm):
         fit = fit_spline(T, R, target_mohm=target_mohm)
         residual = (fit["R"] - fit["spline"](fit["T"])) * 1e3
@@ -799,6 +789,7 @@ def _summary_plot(
     fmt_I,
     fmt_dir,
     fmt_field,
+    np,
     plt,
     tc_summary,
 ):
@@ -808,20 +799,61 @@ def _summary_plot(
     two-panel comparison plots.
     """
     _df = tc_summary.sort_values("tc_K").reset_index(drop=True)
+    _anchor_mask = (
+        np.isclose(_df["sample_current_mA_nominal"], 30.0)
+        & (_df["field_condition"] == "no_magnet")
+    )
+    _anchor_rows = _df[_anchor_mask]
 
     fig, ax = plt.subplots(figsize=(7.0, 3.9))
+    _band_handle = None
+    if set(_anchor_rows["direction"]) >= {"heat", "cool"}:
+        _final_tc = float(_anchor_rows["tc_K"].mean())
+        _final_err = float((_anchor_rows["tc_K"].max() - _anchor_rows["tc_K"].min()) / 2.0)
+        _band_handle = ax.axvspan(
+            _final_tc - _final_err,
+            _final_tc + _final_err,
+            color="#f2b134",
+            alpha=0.18,
+            lw=0,
+            zorder=0,
+        )
+        ax.axvline(
+            _final_tc,
+            color="#8a5a00",
+            lw=1.0,
+            ls=(0, (4, 3)),
+            alpha=0.85,
+            zorder=1,
+        )
+        ax.text(
+            _final_tc,
+            len(_df) - 0.08,
+            rf"final band: ${_final_tc:.2f}\pm{_final_err:.2f}$ K",
+            ha="center",
+            va="top",
+            fontsize=7.8,
+            color="#6f4e00",
+        )
+
     for _i, _r in _df.iterrows():
         _color, _marker, _ = DIR_STYLES[_r["direction"]]
+        _is_anchor = bool(_anchor_mask.iloc[_i])
         ax.errorbar(
             _r["tc_K"], _i, xerr=_r["tc_err_K"],
-            fmt=_marker, ms=6, color=_color,
-            mfc=_color, mec=_color, mew=1.2,
-            ecolor=_color, elinewidth=0.9, capsize=0, zorder=3,
+            fmt=_marker, ms=7.2 if _is_anchor else 5.6,
+            color=_color, alpha=1.0 if _is_anchor else 0.78,
+            mfc=_color, mec="#222222" if _is_anchor else _color,
+            mew=1.3 if _is_anchor else 1.0,
+            ecolor=_color, elinewidth=1.1 if _is_anchor else 0.8,
+            capsize=0, zorder=5 if _is_anchor else 3,
         )
         ax.text(
             _r["tc_K"] + _r["tc_err_K"] + 0.18, _i,
             rf"${_r['tc_K']:.2f}$", va="center", ha="left",
-            fontsize=8, color="#444444",
+            fontsize=8.2 if _is_anchor else 8,
+            fontweight="bold" if _is_anchor else "regular",
+            color="#222222" if _is_anchor else "#555555",
         )
 
     _labels = [
@@ -831,6 +863,10 @@ def _summary_plot(
     ]
     ax.set_yticks(range(len(_df)))
     ax.set_yticklabels(_labels)
+    for _tick, _is_anchor in zip(ax.get_yticklabels(), _anchor_mask):
+        if _is_anchor:
+            _tick.set_fontweight("bold")
+            _tick.set_color("#222222")
     ax.set_ylim(-0.6, len(_df) - 0.4)
     ax.set_xlabel(r"$T_c\;\;(\mathrm{K})$")
     _lo = float((_df["tc_K"] - _df["tc_err_K"]).min())
@@ -843,6 +879,10 @@ def _summary_plot(
         ax.spines[_side].set_visible(False)
 
     _legend = [
+        Line2D([0], [0], color="#f2b134", lw=7, alpha=0.45,
+               label="final estimate band"),
+        Line2D([0], [0], marker="o", ls="none", color="#222222",
+               mfc="white", mec="#222222", label="low-current pair"),
         Line2D([0], [0], marker=DIR_STYLES["heat"][1], ls="none",
                color=DIR_STYLES["heat"][0], label="heating"),
         Line2D([0], [0], marker=DIR_STYLES["cool"][1], ls="none",
@@ -860,12 +900,6 @@ def _summary_plot(
 
 
 @app.cell
-def _show_summary_plot(summary_fig):
-    summary_fig
-    return
-
-
-@app.cell
 def _write(OUT_DIR, spline_diagnostics, tc_summary):
     tc_path = OUT_DIR / "tc_summary.csv"
     diagnostics_path = OUT_DIR / "spline_diagnostics.csv"
@@ -873,6 +907,12 @@ def _write(OUT_DIR, spline_diagnostics, tc_summary):
     spline_diagnostics.to_csv(diagnostics_path, index=False)
     print(f"wrote {tc_path}")
     print(f"wrote {diagnostics_path}")
+    return
+
+
+@app.cell
+def _show_summary_plot(summary_fig):
+    summary_fig
     return
 
 
