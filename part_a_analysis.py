@@ -20,12 +20,13 @@ def _md_intro(mo):
     mo.md(r"""
     # Superconductivity — Part A
 
-    Four-probe resistance of a $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ sample is
-    measured across the superconducting transition.
+    Four-probe resistance $R(T)$ of a $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ sample
+    is measured across the superconducting transition.
 
-    One transition temperature is reported for each run: the temperature where
-    the analytic derivative of a cubic smoothing spline is maximal.
-    This avoids resistance-threshold choices and keeps the analysis to one
+    Each run reports a single transition temperature, the point of steepest
+    ascent of a cubic smoothing spline through $R(T)$,
+    $$T_c = \arg\max_T R'(T).$$
+    This avoids resistance-threshold choices and fixes the analysis to one
     estimator, one smoothing rule, and one uncertainty budget.
     """)
     return
@@ -81,9 +82,7 @@ def _constants():
     SPLINE_SENSITIVITY_TARGETS_MOHM = (0.04, 0.05, 0.06)
     SPLINE_GRID_POINTS = 2000
     SPLINE_BRACKET_STEPS = 12
-    SMOOTHING_SIGMA_THRESHOLD_K = 0.25
     return (
-        SMOOTHING_SIGMA_THRESHOLD_K,
         SPLINE_BRACKET_STEPS,
         SPLINE_DEGREE,
         SPLINE_GRID_POINTS,
@@ -174,7 +173,6 @@ def _load(MEAS_DIR, pd):
 
 @app.cell
 def _md_tc_methods(
-    SMOOTHING_SIGMA_THRESHOLD_K,
     SPLINE_SENSITIVITY_TARGETS_MOHM,
     SPLINE_TARGET_MOHM,
     mo,
@@ -183,36 +181,29 @@ def _md_tc_methods(
     mo.md(rf"""
     ## Method
 
-    Each run is fit with a cubic smoothing spline chosen for the visual shape
-    of the transition,
+    Each run $R(T)$ is fit with a cubic smoothing spline $\hat R$ using SciPy's
+    [`UnivariateSpline`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.UnivariateSpline.html),
+    targeting an RMS residual of
+    $\sigma_\mathrm{{target}} = {SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$ —
+    a level chosen by testing a few values, smooth enough to suppress
+    point-to-point noise while staying on the measured shoulders. The transition
+    temperature is the steepest-ascent point,
 
-    $$R_\mathrm{{spline}}(T) = \mathrm{{UnivariateSpline}}(T, R, k=3, s=n\sigma_\mathrm{{target}}^2),$$
+    $$T_c = \arg\max_{{T}} \hat R{{}}'(T),$$
 
-    where $n$ is the number of data points in that run and
-    $\sigma_\mathrm{{target}}={SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$ is the
-    target RMS residual scale. This is the refined cubic-spline curve selected from the
-    candidate comparison: smooth enough to show the transition shape, but still
-    close to the measured curve and its shoulders.
-    The reported transition temperature is
+    found on a dense grid and refined by bounded maximization of the analytic
+    derivative.
 
-    $$T_c = \operatorname{{arg\,max}}_T \frac{{dR_\mathrm{{spline}}}}{{dT}}.$$
-
-    The derivative is analytic. A dense grid finds the peak neighborhood, then
-    bounded scalar optimization refines the maximum inside that neighborhood.
-
-    The uncertainty has two simple pieces:
+    Its uncertainty combines two terms in quadrature,
 
     $$\sigma_{{T_c}} = \sqrt{{\sigma_\mathrm{{sampling}}^2 + \sigma_\mathrm{{smoothing}}^2}}.$$
 
-    $\sigma_\mathrm{{sampling}}$ is the local temperature-bin width divided by
-    $\sqrt{{12}}$. $\sigma_\mathrm{{smoothing}}$ is a local sensitivity estimate:
-    recompute $T_c$ at target residuals of
-    ${_target_list}\,\mathrm{{m}}\Omega$, then take the largest deviation from
-    the reported value. These are the smooth variants retained after the
-    target-sensitivity audit; the lower $0.03\,\mathrm{{m}}\Omega$ target was
-    rejected as too point-following for this visual-shape method. Runs with
-    $\sigma_\mathrm{{smoothing}}>{SMOOTHING_SIGMA_THRESHOLD_K:g}\,\mathrm{{K}}$
-    are flagged for review, not rejected.
+    $\sigma_\mathrm{{sampling}} = \dfrac{{T_{{i+1}} - T_{{i-1}}}}{{2\sqrt{{12}}}}$, evaluated
+    at the sample $T_i$ nearest $T_c$, models the local temperature bin as a
+    uniform distribution over the spacing to its neighbors.
+    $\sigma_\mathrm{{smoothing}} = \max_k \lvert T_c(\sigma_k) - T_c \rvert$ is the
+    largest shift in $T_c$ as the target is swept over
+    $\sigma_k \in \{{{_target_list}\}}\,\mathrm{{m}}\Omega$.
     """)
     return
 
@@ -227,56 +218,24 @@ def _spline_model_helpers(
     minimize_scalar,
     np,
 ):
-    def prepare_spline_inputs(T, R, R_sigma=None):
+    def prepare_spline_inputs(T, R):
         T = np.asarray(T, dtype=float)
         R = np.asarray(R, dtype=float)
         ok = np.isfinite(T) & np.isfinite(R)
-        if R_sigma is not None:
-            R_sigma = np.asarray(R_sigma, dtype=float)
-            ok &= np.isfinite(R_sigma) & (R_sigma > 0)
         T, R = T[ok], R[ok]
-
         order = np.argsort(T)
         T, R = T[order], R[order]
-        R_sigma = None if R_sigma is None else R_sigma[ok][order]
-
-        T_unique, inv = np.unique(T, return_inverse=True)
-        if len(T_unique) != len(T):
-            weighted_R = np.zeros_like(T_unique, dtype=float)
-            counts = np.zeros_like(T_unique, dtype=float)
-            np.add.at(weighted_R, inv, R)
-            np.add.at(counts, inv, 1.0)
-            R = weighted_R / counts
-            if R_sigma is not None:
-                sigma_sum = np.zeros_like(T_unique, dtype=float)
-                np.add.at(sigma_sum, inv, R_sigma)
-                R_sigma = sigma_sum / counts
-            T = T_unique
-
         if len(T) < SPLINE_DEGREE + 1:
             raise ValueError("not enough points for a cubic smoothing spline")
-        return T, R, R_sigma
+        return T, R
 
-    def fit_spline(T, R, R_sigma=None, target_mohm=None):
-        T, R, R_sigma = prepare_spline_inputs(T, R, R_sigma)
-        n = len(T)
+    def fit_spline(T, R, target_mohm=None):
+        T, R = prepare_spline_inputs(T, R)
         target_mohm = SPLINE_TARGET_MOHM if target_mohm is None else float(target_mohm)
-        target_ohm = target_mohm * 1e-3
-        s = n * target_ohm**2
+        s = len(T) * (target_mohm * 1e-3) ** 2
         spline = UnivariateSpline(T, R, k=SPLINE_DEGREE, s=s)
-        residual = R - spline(T)
-        rmse_ohm = float(np.sqrt(np.mean(residual**2)))
-        return dict(
-            T=T,
-            R=R,
-            R_sigma=R_sigma,
-            n=n,
-            s=s,
-            target_mohm=target_mohm,
-            spline=spline,
-            rmse_ohm=rmse_ohm,
-            rmse_mohm=rmse_ohm * 1e3,
-        )
+        rmse_mohm = float(np.sqrt(np.mean((R - spline(T)) ** 2))) * 1e3
+        return dict(T=T, R=R, spline=spline, rmse_mohm=rmse_mohm)
 
     def derivative_peak(spline, T_min, T_max):
         d_spline = spline.derivative()
@@ -312,7 +271,6 @@ def _spline_model_helpers(
 
 @app.cell
 def _analysis(
-    SMOOTHING_SIGMA_THRESHOLD_K,
     SPLINE_SENSITIVITY_TARGETS_MOHM,
     SPLINE_TARGET_MOHM,
     derivative_peak,
@@ -320,13 +278,12 @@ def _analysis(
     measurements,
     np,
     pd,
-    sigma_R,
     sigma_T_at,
 ):
     """Analyze each run once; the summary is the single source of truth."""
 
-    def _tc_for_target(T, R, R_sigma, target_mohm):
-        fit = fit_spline(T, R, R_sigma, target_mohm=target_mohm)
+    def _tc_for_target(T, R, target_mohm):
+        fit = fit_spline(T, R, target_mohm=target_mohm)
         tc, _, _, _ = derivative_peak(fit["spline"], fit["T"].min(), fit["T"].max())
         return tc
 
@@ -334,11 +291,8 @@ def _analysis(
         meta = df.iloc[0]
         T = df["temperature_K"].to_numpy(dtype=float)
         R = df["resistance_ohm"].to_numpy(dtype=float)
-        V = df["voltage_V"].to_numpy(dtype=float)
-        I = df["current_A"].to_numpy(dtype=float)
 
-        sigma_R_values = sigma_R(V, I)
-        fit = fit_spline(T, R, sigma_R_values, target_mohm=SPLINE_TARGET_MOHM)
+        fit = fit_spline(T, R, target_mohm=SPLINE_TARGET_MOHM)
         tc, dR_peak, T_grid, dR_grid = derivative_peak(
             fit["spline"],
             fit["T"].min(),
@@ -347,17 +301,13 @@ def _analysis(
 
         target_values = np.array(SPLINE_SENSITIVITY_TARGETS_MOHM, dtype=float)
         tc_sweep = np.array([
-            _tc_for_target(T, R, sigma_R_values, target_mohm)
+            _tc_for_target(T, R, target_mohm)
             for target_mohm in target_values
         ])
         finite_tc = tc_sweep[np.isfinite(tc_sweep)]
         sigma_smoothing = float(np.max(np.abs(finite_tc - tc))) if len(finite_tc) else float("nan")
         sigma_sampling = sigma_T_at(fit["T"], tc)
         tc_err = float(np.hypot(sigma_sampling, sigma_smoothing))
-        smoothing_flag = bool(
-            np.isfinite(sigma_smoothing)
-            and sigma_smoothing > SMOOTHING_SIGMA_THRESHOLD_K
-        )
 
         overlay = dict(
             T=T_grid,
@@ -380,7 +330,6 @@ def _analysis(
             spline_target_mohm=SPLINE_TARGET_MOHM,
             spline_sensitivity_targets_mohm=";".join(f"{_t:g}" for _t in target_values),
             spline_rmse_mohm=fit["rmse_mohm"],
-            tc_smoothing_flag=smoothing_flag,
         )
         return record, overlay
 
@@ -455,10 +404,9 @@ def _md_fit_diagnostics(mo):
     mo.md(r"""
     ## Spline Fit Diagnostics
 
-    These checks test whether the spline captures the measured resistance
-    curve. The RMS residual should sit near the chosen 0.04 m$\Omega$ target,
-    while holdout RMS and the rolling residual column check for local systematic
-    misses.
+    These check that the spline tracks the measured curve. The RMS residual
+    should sit near the $0.04\,\mathrm{m}\Omega$ target; the blocked-holdout RMS
+    and rolling-mean residual flag any local systematic miss.
     """)
     return
 
@@ -470,37 +418,34 @@ def _spline_diagnostics(
     measurements,
     np,
     pd,
-    sigma_R,
 ):
-    def _residual_stats(T, R, R_sigma, target_mohm):
-        fit = fit_spline(T, R, R_sigma, target_mohm=target_mohm)
-        residual_mohm = (fit["R"] - fit["spline"](fit["T"])) * 1e3
-        z = residual_mohm
-        window = max(5, len(z) // 8)
+    def _residual_stats(T, R, target_mohm):
+        fit = fit_spline(T, R, target_mohm=target_mohm)
+        residual = (fit["R"] - fit["spline"](fit["T"])) * 1e3
+        window = max(5, len(residual) // 8)
         if window % 2 == 0:
             window += 1
-        window = min(window, len(z) if len(z) % 2 else len(z) - 1)
+        window = min(window, len(residual) if len(residual) % 2 else len(residual) - 1)
         if window < 3:
             rolling = np.array([np.nan])
         else:
-            rolling = np.convolve(z, np.ones(window) / window, mode="valid")
+            rolling = np.convolve(residual, np.ones(window) / window, mode="valid")
         return dict(
             rms_mohm=fit["rmse_mohm"],
-            max_abs_mohm=float(np.max(np.abs(z))),
+            max_abs_mohm=float(np.max(np.abs(residual))),
             max_rolling_mean_mohm=float(np.nanmax(np.abs(rolling))),
         )
 
-    def _blocked_holdout_rms(T, R, R_sigma, target_mohm, blocks=5):
+    def _blocked_holdout_rms(T, R, target_mohm, blocks=5):
         T = np.asarray(T, dtype=float)
         R = np.asarray(R, dtype=float)
-        R_sigma = np.asarray(R_sigma, dtype=float)
         errors = []
         for offset in range(blocks):
             test = np.arange(len(T)) % blocks == offset
             train = ~test
             if train.sum() < 8 or test.sum() == 0:
                 continue
-            fit = fit_spline(T[train], R[train], R_sigma[train], target_mohm=target_mohm)
+            fit = fit_spline(T[train], R[train], target_mohm=target_mohm)
             errors.extend(((R[test] - fit["spline"](T[test])) * 1e3).tolist())
         errors = np.asarray(errors, dtype=float)
         return float(np.sqrt(np.mean(errors**2))) if len(errors) else float("nan")
@@ -510,18 +455,14 @@ def _spline_diagnostics(
         meta = _df.iloc[0]
         T = _df["temperature_K"].to_numpy(dtype=float)
         R = _df["resistance_ohm"].to_numpy(dtype=float)
-        R_sigma = sigma_R(
-            _df["voltage_V"].to_numpy(dtype=float),
-            _df["current_A"].to_numpy(dtype=float),
-        )
-        stats = _residual_stats(T, R, R_sigma, SPLINE_TARGET_MOHM)
+        stats = _residual_stats(T, R, SPLINE_TARGET_MOHM)
         rows.append({
             "I (mA)": int(meta["sample_current_mA_nominal"]),
             "sweep": meta["direction"],
             "field": meta["field_condition"],
             "target (mOhm)": f"{SPLINE_TARGET_MOHM:.2f}",
             "RMS resid (mOhm)": f"{stats['rms_mohm']:.3f}",
-            "holdout RMS (mOhm)": f"{_blocked_holdout_rms(T, R, R_sigma, SPLINE_TARGET_MOHM):.3f}",
+            "holdout RMS (mOhm)": f"{_blocked_holdout_rms(T, R, SPLINE_TARGET_MOHM):.3f}",
             "max |resid| (mOhm)": f"{stats['max_abs_mohm']:.3f}",
             "max rolling mean (mOhm)": f"{stats['max_rolling_mean_mohm']:.3f}",
         })
@@ -591,63 +532,49 @@ def _fmt():
 
 
 @app.cell
-def _two_panel(Line2D, T_MAX, T_MIN, plt):
-    _CRIT_HANDLES = [
-        Line2D([0], [0], color="#444444", ls=(0, (5, 3)), lw=1.0,
-               label=r"$T_c^{\,\max\,\mathrm{d}R/\mathrm{d}T}$"),
-        Line2D([0], [0], color="#444444", ls="-", lw=1.6,
-               label=r"cubic smoothing spline ($0.04\,\mathrm{m}\Omega$ target)"),
-    ]
-
+def _two_panel(T_MAX, T_MIN, plt):
     def build(_title=None):
         fig, (ax_r, ax_d) = plt.subplots(
-            2, 1, figsize=(8.0, 6.2), sharex=True,
-            gridspec_kw={"height_ratios": [2.2, 1.0], "hspace": 0.08},
+            2, 1, figsize=(7.2, 5.6), sharex=True,
+            gridspec_kw={"height_ratios": [2.4, 1.0], "hspace": 0.07},
         )
         if _title:
-            fig.suptitle(_title, x=0.54, y=0.965, fontsize=14, fontweight="medium")
-        ax_r.set_ylabel(r"$R$  (m$\Omega$)")
-        ax_d.set_xlabel(r"Temperature  $T$  (K)")
-        ax_d.set_ylabel(r"$\mathrm{d}R/\mathrm{d}T$  (m$\Omega$/K)")
+            fig.suptitle(_title, x=0.5, y=0.97, fontsize=13, fontweight="medium")
+        ax_r.set_ylabel(r"$R\;\;(\mathrm{m}\Omega)$")
+        ax_d.set_xlabel(r"$T\;\;(\mathrm{K})$")
+        ax_d.set_ylabel(r"$R'\;\;(\mathrm{m}\Omega/\mathrm{K})$")
         for ax in (ax_r, ax_d):
-            ax.grid(True, axis="y", alpha=0.12, lw=0.5)
-            ax.tick_params(direction="in", length=3.5, top=False, right=False)
+            ax.grid(True, axis="y", alpha=0.1, lw=0.5)
+            ax.tick_params(direction="in", length=3, top=False, right=False)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
         ax_d.set_xlim(T_MIN - 1, T_MAX + 1)
-        ax_d.legend(
-            handles=_CRIT_HANDLES, loc="upper right",
-            frameon=False, fontsize=8.5,
-        )
         return fig, ax_r, ax_d
 
     def legend_with_info(ax, info):
-        _handles, _labels = ax.get_legend_handles_labels()
-        _handles.append(Line2D([], [], color="none"))
-        _labels.append(info)
-        ax.legend(_handles, _labels, loc="upper left", frameon=False)
+        ax.legend(
+            loc="upper left", frameon=False, fontsize=8.5,
+            title=f"${info}$" if not info.startswith("$") else info,
+            title_fontsize=9, alignment="left", handlelength=1.6,
+        )
 
     def draw(ax_r, ax_d, tr, sp, color, marker, label):
         tc = sp["tc"]
         ax_r.errorbar(
             tr["T"], tr["R"] * 1e3,
             xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
-            fmt=marker, ms=3.8, mfc="none", mec=color, mew=0.8,
+            fmt=marker, ms=3.6, mfc="none", mec=color, mew=0.7,
             ecolor=color, elinewidth=0.5, capsize=0,
-            alpha=0.7, zorder=2,
+            alpha=0.6, zorder=2,
         )
         ax_r.plot(
-            sp["T"], sp["R"] * 1e3, lw=1.8, color=color, zorder=3,
-            label=rf"{label}  —  $T_c = {tc:.2f}\,$K",
+            sp["T"], sp["R"] * 1e3, lw=1.6, color=color, zorder=3,
+            label=rf"{label},  $T_c = {tc:.2f}\,$K",
         )
-        ax_r.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.9, alpha=0.5, zorder=1)
+        ax_r.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.45, zorder=1)
 
-        ax_d.plot(sp["T"], sp["dR_dT"] * 1e3, color=color, lw=1.6, alpha=0.85)
-        ax_d.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.9, alpha=0.5, zorder=1)
-        ax_d.plot(
-            [tc], [sp["dR_dT_peak"] * 1e3],
-            marker="v", ms=6, color=color, mec="white", mew=0.8, zorder=4,
-        )
+        ax_d.plot(sp["T"], sp["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.85)
+        ax_d.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.45, zorder=1)
 
     return build, draw, legend_with_info
 
@@ -729,7 +656,7 @@ def _md_plot_guide(mo, tc_summary):
     mo.md(rf"""
     ## Main Comparisons
 
-    Dashed vertical lines mark the smoothing-spline max-derivative $T_c$.
+    Dashed lines mark $T_c = \arg\max_T R'(T)$; the lower panel shows $R'(T)$.
 
     - **Thermal hysteresis:** at $30\,\mathrm{{mA}}$, heating is
       ${_lag_30:.2f}\,\mathrm{{K}}$ above cooling.
@@ -827,9 +754,9 @@ def _md_final(mo):
     mo.md(r"""
     ## Results
 
-    Reported values are smoothing-spline max-derivative $T_c$ values. The total
-    uncertainty combines local temperature sampling and smoothing sensitivity in
-    quadrature. The numeric CSV is written to `results/part_a/tc_summary.csv`.
+    Each $T_c = \arg\max_T R'(T)$ is reported with the combined uncertainty
+    $\sigma_{T_c}$. The figure orders the runs by $T_c$. Tables and figure are
+    written to `results/part_a/`.
     """)
     return
 
@@ -853,7 +780,6 @@ def _final_table(pd, tc_summary):
             "target [mOhm]": f"{_r['spline_target_mohm']:.2f}",
             "sweep [mOhm]": _r["spline_sensitivity_targets_mohm"],
             "RMS resid [mOhm]": f"{_r['spline_rmse_mohm']:.3f}",
-            "flag": "review" if _r["tc_smoothing_flag"] else "",
         })
     final_table = pd.DataFrame(_rows)
     return (final_table,)
@@ -862,6 +788,80 @@ def _final_table(pd, tc_summary):
 @app.cell
 def _show_final(final_table):
     final_table
+    return
+
+
+@app.cell
+def _summary_plot(
+    DIR_STYLES,
+    Line2D,
+    OUT_DIR,
+    fmt_I,
+    fmt_dir,
+    fmt_field,
+    plt,
+    tc_summary,
+):
+    """Forest-style overview of the reported Tc per run, ordered by value.
+
+    Color and marker encode sweep direction (heating / cooling), matching the
+    two-panel comparison plots.
+    """
+    _df = tc_summary.sort_values("tc_K").reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(7.0, 3.9))
+    for _i, _r in _df.iterrows():
+        _color, _marker, _ = DIR_STYLES[_r["direction"]]
+        ax.errorbar(
+            _r["tc_K"], _i, xerr=_r["tc_err_K"],
+            fmt=_marker, ms=6, color=_color,
+            mfc=_color, mec=_color, mew=1.2,
+            ecolor=_color, elinewidth=0.9, capsize=0, zorder=3,
+        )
+        ax.text(
+            _r["tc_K"] + _r["tc_err_K"] + 0.18, _i,
+            rf"${_r['tc_K']:.2f}$", va="center", ha="left",
+            fontsize=8, color="#444444",
+        )
+
+    _labels = [
+        rf"${fmt_I(_r['sample_current_mA_nominal'])}$,  {fmt_dir(_r['direction'])},  "
+        rf"${fmt_field(_r['field_condition'])}$"
+        for _, _r in _df.iterrows()
+    ]
+    ax.set_yticks(range(len(_df)))
+    ax.set_yticklabels(_labels)
+    ax.set_ylim(-0.6, len(_df) - 0.4)
+    ax.set_xlabel(r"$T_c\;\;(\mathrm{K})$")
+    _lo = float((_df["tc_K"] - _df["tc_err_K"]).min())
+    _hi = float((_df["tc_K"] + _df["tc_err_K"]).max())
+    ax.set_xlim(_lo - 0.6, _hi + 1.6)
+    ax.grid(True, axis="x", alpha=0.1, lw=0.5)
+    ax.tick_params(axis="x", direction="in", length=3, top=False)
+    ax.tick_params(axis="y", length=0)
+    for _side in ("top", "right", "left"):
+        ax.spines[_side].set_visible(False)
+
+    _legend = [
+        Line2D([0], [0], marker=DIR_STYLES["heat"][1], ls="none",
+               color=DIR_STYLES["heat"][0], label="heating"),
+        Line2D([0], [0], marker=DIR_STYLES["cool"][1], ls="none",
+               color=DIR_STYLES["cool"][0], label="cooling"),
+    ]
+    ax.legend(handles=_legend, loc="lower right", frameon=False,
+              fontsize=8.5, handletextpad=0.4, labelspacing=0.3)
+    fig.subplots_adjust(left=0.36, right=0.97, bottom=0.13, top=0.96)
+
+    summary_fig = fig
+    summary_plot_path = OUT_DIR / "tc_summary.png"
+    fig.savefig(summary_plot_path)
+    print(f"wrote {summary_plot_path}")
+    return (summary_fig,)
+
+
+@app.cell
+def _show_summary_plot(summary_fig):
+    summary_fig
     return
 
 
