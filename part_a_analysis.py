@@ -25,9 +25,11 @@ def _md_intro(mo):
     superconducting transition.
 
     The transition is broad enough that a fixed resistance threshold would be
-    arbitrary, so each run is summarized by the steepest point of a smoothed
-    $R(T)$ curve:
+    arbitrary, so each run is summarized by one operational resistive transition
+    temperature: the steepest point of a smoothed $R(T)$ curve,
     $$T_c = \arg\max_T R'(T).$$
+    This is a resistive $T_c$ for the run's field and current conditions; it is
+    not meant to introduce separate critical temperatures for separate phases.
     """)
     return
 
@@ -191,19 +193,33 @@ def _md_tc_methods(SPLINE_TARGET_MOHM, TRANSITION_DERIVATIVE_FRACTION, mo):
     mo.md(rf"""
     ## Method
 
-    For each run, fit a cubic smoothing spline $\hat R(T)$ with target RMS
-    residual ${SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$. Then find the maximum
-    of the analytic derivative:
+    For each run, fit a cubic smoothing spline $\hat R(T)$. This is not an
+    interpolating cubic spline: it is still piecewise cubic, but it is allowed to
+    miss individual noisy points. The smoothing parameter is chosen so the RMS
+    residual is about ${SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$; in the code,
+    this means
+    $s=N({SPLINE_TARGET_MOHM:g}\times10^{{-3}}\,\Omega)^2$.
+
+    After fitting, SciPy constructs the derivative spline analytically from the
+    fitted piecewise polynomials. The dense grid is used only to bracket the
+    maximum before bounded optimization:
 
     $$T_c = \arg\max_T \hat R'(T).$$
 
-    The reported uncertainty has two pieces:
+    The reported uncertainty is an operational uncertainty for assigning one
+    number to a broad transition:
 
     $$\sigma_{{T_c}} = \sqrt{{\sigma_\mathrm{{sampling}}^2 + \sigma_\mathrm{{transition}}^2}}.$$
 
-    $\sigma_\mathrm{{sampling}}$ is set by the local temperature spacing near
-    $T_c$. $\sigma_\mathrm{{transition}}$ describes how wide the derivative peak
-    is: find $T_L$ and $T_R$ where
+    $\sigma_\mathrm{{sampling}}$ is a conservative temperature-location term from
+    the finite temperature sampling. At the measured point nearest $T_c$, the
+    local span is taken as $T_{{i+1}}-T_{{i-1}}$ and modeled as a uniform
+    interval, giving
+    $\sigma_\mathrm{{sampling}}=(T_{{i+1}}-T_{{i-1}})/\sqrt{{12}}$.
+
+    $\sigma_\mathrm{{transition}}$ describes how broad the derivative peak is.
+    A sharper transition gives a smaller ambiguity in the single reported
+    $T_c$; a broad peak gives a larger one. Find $T_L$ and $T_R$ where
     $\hat R'(T) = {TRANSITION_DERIVATIVE_FRACTION:g}\,\hat R'(T_c)$, make the
     interval symmetric with
     $\Delta T = \max(T_c - T_L, T_R - T_c)$, and treat that interval as uniform:
@@ -690,7 +706,9 @@ def _md_plot_guide(TRANSITION_DERIVATIVE_FRACTION, mo, tc_summary):
     fit, and the lower panel is the spline derivative. Dashed lines mark $T_c$.
     The shaded bands show the symmetric
     ${TRANSITION_DERIVATIVE_FRACTION:g}R'(T_c)$ derivative width used for
-    $\sigma_\mathrm{{transition}}$.
+    $\sigma_\mathrm{{transition}}$. All comparisons below are comparisons of this
+    operational resistive $T_c$ under different sweep, current, and field
+    conditions.
 
     - **Thermal hysteresis:** at $30\,\mathrm{{mA}}$, heating is
       ${_lag_30:.2f}\,\mathrm{{K}}$ above cooling.
@@ -819,7 +837,7 @@ def _reported_tc(np, tc_summary):
 @app.cell
 def _md_final(mo, reported_tc):
     _reported = (
-        rf"The low-current, zero-field pair gives "
+        rf"The inverse-variance weighted low-current, zero-field pair gives "
         rf"$T_c = {reported_tc['tc_K']:.2f}\pm{reported_tc['err_K']:.2f}\,\mathrm{{K}}$."
         if reported_tc is not None
         else "The table below reports each run individually."
@@ -907,7 +925,7 @@ def _summary_plot(
             zorder=1,
         )
         ax.set_title(
-            rf"low-current estimate: ${_final_tc:.2f}\pm{_final_err:.2f}$ K",
+            rf"weighted low-current estimate: ${_final_tc:.2f}\pm{_final_err:.2f}$ K",
             fontsize=10,
             color="#6f4e00",
             pad=8,
