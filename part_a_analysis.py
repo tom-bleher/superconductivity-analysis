@@ -42,8 +42,7 @@ def _imports():
     import pandas as pd
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
-    from scipy.interpolate import UnivariateSpline
-    from scipy.optimize import minimize_scalar
+    from scipy.signal import savgol_filter
 
     plt.rcParams.update({
         "font.size": 10,
@@ -64,7 +63,7 @@ def _imports():
         "savefig.dpi": 200,
         "figure.facecolor": "white",
     })
-    return Line2D, Path, UnivariateSpline, minimize_scalar, mo, np, pd, plt
+    return Line2D, Path, mo, np, pd, plt, savgol_filter
 
 
 @app.cell
@@ -79,16 +78,10 @@ def _paths(Path):
 
 @app.cell
 def _constants():
-    SPLINE_DEGREE = 5
-    SPLINE_TARGET_MOHM = 0.04
-    SPLINE_GRID_POINTS = 2000
-    SPLINE_BRACKET_STEPS = 12
-    return (
-        SPLINE_BRACKET_STEPS,
-        SPLINE_DEGREE,
-        SPLINE_GRID_POINTS,
-        SPLINE_TARGET_MOHM,
-    )
+    SG_POLYORDER = 3
+    SG_WINDOW_K = 3.25
+    SG_GRID_STEP_K = 0.02
+    return SG_GRID_STEP_K, SG_POLYORDER, SG_WINDOW_K
 
 
 @app.cell
@@ -177,21 +170,35 @@ def _load(MEAS_DIR, pd):
 
 
 @app.cell
-def _md_tc_methods(SPLINE_TARGET_MOHM, mo):
+def _md_tc_methods(SG_POLYORDER, SG_WINDOW_K, mo):
     mo.md(rf"""
     ## Method
 
-    For each run, fit a quintic smoothing spline $\hat R(T)$. This is not an
-    interpolating spline: it is allowed to miss individual noisy points. The
-    smoothing parameter is chosen so the RMS residual is about
-    ${SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$; in the code, this means
-    $s=N({SPLINE_TARGET_MOHM:g}\times10^{{-3}}\,\Omega)^2$.
+    For each run, interpolate the measured $R(T)$ points onto a fine uniform
+    temperature grid and apply a Savitzky--Golay local-polynomial filter. The
+    filter fits a polynomial of order ${SG_POLYORDER}$ in a moving
+    ${SG_WINDOW_K:g}\,\mathrm{{K}}$ window and evaluates both the smoothed curve
+    and its first derivative. This is a local derivative estimate rather than a
+    global spline with a chosen residual target.
 
-    After fitting, SciPy constructs the first derivative spline analytically
-    from the fitted piecewise polynomials. The dense grid is used only to
-    bracket the maximum before bounded optimization:
+    The critical temperature is the maximum of the filtered derivative,
 
-    $$T_c = \arg\max_T \hat R'(T).$$
+    $$T_c = \arg\max_T \frac{{d\hat R}}{{dT}}.$$
+
+    The derivative is evaluated on the uniform grid, then the peak location is
+    refined by a local quadratic fit to the three neighboring derivative-grid
+    points. The polynomial order and window width were chosen from the expanded
+    method study, not by visual smoothness: orders 2--5 and windows 1--6 K were
+    tested by synthetic resampling, leave-temperature-block-out stability,
+    agreement with the broader derivative-method ensemble, and preservation of
+    the derivative peak width. The selected cubic 3.25 K window is the lowest
+    scoring shape-preserving cubic setting. It improves stability relative to a
+    2.5 K window while avoiding the transition broadening produced by the wide
+    5--6 K windows.
+
+    The 0.02 K grid step is only numerical resolution for evaluating and
+    refining the maximum; it is much smaller than the experimental temperature
+    spacing and is not treated as a physical temperature precision.
 
     The reported interval is an operational interval for assigning one number
     to a broad transition.
@@ -205,10 +212,10 @@ def _md_tc_methods(SPLINE_TARGET_MOHM, mo):
     $\Delta T$ describes how broad the derivative peak is.
     A sharper transition gives a smaller ambiguity in the single reported
     $T_c$; a broad peak gives a larger one. Let
-    $g(T)=\hat R'(T)$. We use the central concave-down part of the derivative
+    $g(T)=d\hat R/dT$. We use the central concave-down part of the derivative
     peak: $T_L$ and $T_R$ are the nearest temperatures around $T_c$ where the
     curvature of $g$ changes sign,
-    $$g''(T)=\hat R'''(T)=0.$$
+    $$g''(T)=0.$$
     Inside this interval, the derivative peak is locally peak-like and
     approximately parabolic. Since the measured peak does not need to be
     symmetric, the quoted half-width is
@@ -230,80 +237,129 @@ def _md_tc_methods(SPLINE_TARGET_MOHM, mo):
 
 
 @app.cell
-def _spline_model_helpers(
-    SPLINE_BRACKET_STEPS,
-    SPLINE_DEGREE,
-    SPLINE_GRID_POINTS,
-    SPLINE_TARGET_MOHM,
-    UnivariateSpline,
-    minimize_scalar,
+def _savgol_model_helpers(
+    SG_GRID_STEP_K,
+    SG_POLYORDER,
+    SG_WINDOW_K,
     np,
+    savgol_filter,
 ):
-    def prepare_spline_inputs(T, R):
+    def prepare_savgol_inputs(T, R):
         T = np.asarray(T, dtype=float)
         R = np.asarray(R, dtype=float)
         ok = np.isfinite(T) & np.isfinite(R)
         T, R = T[ok], R[ok]
         order = np.argsort(T)
         T, R = T[order], R[order]
-        if len(T) < SPLINE_DEGREE + 1:
-            raise ValueError("not enough points for a quintic smoothing spline")
+        if len(T) < SG_POLYORDER + 3:
+            raise ValueError("not enough points for Savitzky-Golay filtering")
         return T, R
 
-    def fit_spline(T, R, target_mohm=None):
-        T, R = prepare_spline_inputs(T, R)
-        target_mohm = SPLINE_TARGET_MOHM if target_mohm is None else float(target_mohm)
-        s = len(T) * (target_mohm * 1e-3) ** 2
-        spline = UnivariateSpline(T, R, k=SPLINE_DEGREE, s=s)
-        residual = R - spline(T)
+    def _window_points(n_grid, window_K):
+        points = int(round(float(window_K) / SG_GRID_STEP_K))
+        if points % 2 == 0:
+            points += 1
+        minimum = SG_POLYORDER + 2
+        if minimum % 2 == 0:
+            minimum += 1
+        points = max(points, minimum)
+        if points > n_grid:
+            points = n_grid if n_grid % 2 == 1 else n_grid - 1
+        if points <= SG_POLYORDER:
+            raise ValueError("Savitzky-Golay window is too short")
+        return points
+
+    def _transition_bounds(T, R):
+        n_edge = max(5, len(T) // 10)
+        low = float(np.nanmedian(R[:n_edge]))
+        high = float(np.nanmedian(R[-n_edge:]))
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            return float(T.min()), float(T.max())
+        normalized = (R - low) / (high - low)
+        in_transition = (normalized >= 0.05) & (normalized <= 0.95)
+        if np.count_nonzero(in_transition) < 5:
+            return float(T.min()), float(T.max())
+        left = max(float(T.min()), float(T[in_transition][0]) - 1.0)
+        right = min(float(T.max()), float(T[in_transition][-1]) + 1.0)
+        return (left, right) if right > left else (float(T.min()), float(T.max()))
+
+    def fit_savgol(T, R, window_K=None):
+        T, R = prepare_savgol_inputs(T, R)
+        window_K = SG_WINDOW_K if window_K is None else float(window_K)
+        T_grid = np.arange(float(T.min()), float(T.max()) + SG_GRID_STEP_K / 2.0, SG_GRID_STEP_K)
+        R_uniform = np.interp(T_grid, T, R)
+        window_points = _window_points(len(T_grid), window_K)
+        R_smooth = savgol_filter(
+            R_uniform,
+            window_points,
+            SG_POLYORDER,
+            deriv=0,
+            mode="interp",
+        )
+        dR_grid = savgol_filter(
+            R_uniform,
+            window_points,
+            SG_POLYORDER,
+            deriv=1,
+            delta=SG_GRID_STEP_K,
+            mode="interp",
+        )
+        residual = R - np.interp(T, T_grid, R_smooth)
         rmse_mohm = float(np.sqrt(np.mean(residual**2))) * 1e3
         return dict(
             T=T,
             R=R,
-            spline=spline,
+            T_grid=T_grid,
+            R_grid=R_smooth,
+            dR_grid=dR_grid,
             rmse_mohm=rmse_mohm,
-            target_mohm=target_mohm,
-            smoothing_s=s,
+            window_K=window_K,
+            window_points=window_points,
+            polyorder=SG_POLYORDER,
+            search_bounds=_transition_bounds(T, R),
         )
 
-    def derivative_peak(spline, T_min, T_max):
-        d_spline = spline.derivative()
-        T_grid = np.linspace(float(T_min), float(T_max), SPLINE_GRID_POINTS)
-        dR_grid = np.asarray(d_spline(T_grid), dtype=float)
+    def _quadratic_peak(T_grid, y_grid, i_peak):
+        if i_peak <= 0 or i_peak >= len(T_grid) - 1:
+            return float(T_grid[i_peak]), float(y_grid[i_peak])
+        x = T_grid[i_peak - 1 : i_peak + 2]
+        y = y_grid[i_peak - 1 : i_peak + 2]
+        if not np.all(np.isfinite(y)):
+            return float(T_grid[i_peak]), float(y_grid[i_peak])
+        a, b, c = np.polyfit(x, y, deg=2)
+        if a >= 0:
+            return float(T_grid[i_peak]), float(y_grid[i_peak])
+        vertex = float(-b / (2.0 * a))
+        if x[0] <= vertex <= x[-1]:
+            return vertex, float(a * vertex**2 + b * vertex + c)
+        return float(T_grid[i_peak]), float(y_grid[i_peak])
+
+    def derivative_peak(fit):
+        T_grid = fit["T_grid"]
+        dR_grid = np.asarray(fit["dR_grid"], dtype=float)
+        lo, hi = fit["search_bounds"]
         finite = np.isfinite(dR_grid)
-        if not np.any(finite):
+        in_bounds = (T_grid >= lo) & (T_grid <= hi)
+        valid = finite & in_bounds
+        if not np.any(valid):
             return float("nan"), float("nan"), T_grid, dR_grid
 
-        finite_idx = np.flatnonzero(finite)
-        i_peak = int(finite_idx[np.argmax(dR_grid[finite])])
-        lo = float(T_grid[max(0, i_peak - SPLINE_BRACKET_STEPS)])
-        hi = float(T_grid[min(len(T_grid) - 1, i_peak + SPLINE_BRACKET_STEPS)])
+        valid_idx = np.flatnonzero(valid)
+        i_peak = int(valid_idx[np.argmax(dR_grid[valid])])
+        tc, dR_peak = _quadratic_peak(T_grid, dR_grid, i_peak)
 
-        if hi <= lo:
-            tc = float(T_grid[i_peak])
-        else:
-            result = minimize_scalar(
-                lambda T: -float(d_spline(T)),
-                bounds=(lo, hi),
-                method="bounded",
-                options={"xatol": 1e-10},
-            )
-            if result.success and np.isfinite(result.x):
-                tc = float(result.x)
-            else:
-                tc = float(T_grid[i_peak])
+        return tc, dR_peak, T_grid, dR_grid
 
-        return tc, float(d_spline(tc)), T_grid, dR_grid
-
-    return derivative_peak, fit_spline
+    return derivative_peak, fit_savgol
 
 
 @app.cell
 def _analysis(
-    SPLINE_DEGREE,
-    SPLINE_TARGET_MOHM,
+    SG_GRID_STEP_K,
+    SG_POLYORDER,
+    SG_WINDOW_K,
     derivative_peak,
-    fit_spline,
+    fit_savgol,
     measurements,
     np,
     pd,
@@ -398,12 +454,8 @@ def _analysis(
         T = df["temperature_K"].to_numpy(dtype=float)
         R = df["resistance_ohm"].to_numpy(dtype=float)
 
-        fit = fit_spline(T, R, target_mohm=SPLINE_TARGET_MOHM)
-        tc, _dR_peak, T_grid, dR_grid = derivative_peak(
-            fit["spline"],
-            fit["T"].min(),
-            fit["T"].max(),
-        )
+        fit = fit_savgol(T, R, window_K=SG_WINDOW_K)
+        tc, _dR_peak, T_grid, dR_grid = derivative_peak(fit)
 
         interval_delta, interval_width, interval_detail = (
             _transition_interval(tc, T_grid, dR_grid)
@@ -413,7 +465,7 @@ def _analysis(
 
         overlay = dict(
             T=T_grid,
-            R=fit["spline"](T_grid),
+            R=fit["R_grid"],
             dR_dT=dR_grid,
             tc=tc,
             transition_Tleft=interval_detail["T_left"],
@@ -442,10 +494,12 @@ def _analysis(
             tc_derivative_curvature_at_center=interval_detail[
                 "curvature_at_center"
             ],
-            spline_degree=SPLINE_DEGREE,
-            spline_target_mohm=SPLINE_TARGET_MOHM,
-            spline_rmse_mohm=fit["rmse_mohm"],
-            spline_s=fit["smoothing_s"],
+            method="Savitzky-Golay",
+            sg_polyorder=SG_POLYORDER,
+            sg_window_K=fit["window_K"],
+            sg_window_points=fit["window_points"],
+            sg_grid_step_K=SG_GRID_STEP_K,
+            sg_rmse_mohm=fit["rmse_mohm"],
         )
         return record, overlay
 
@@ -466,16 +520,16 @@ def _analysis(
 
 @app.cell
 def _spline_diagnostics(
-    SPLINE_DEGREE,
-    SPLINE_TARGET_MOHM,
-    fit_spline,
+    SG_POLYORDER,
+    SG_WINDOW_K,
+    fit_savgol,
     measurements,
     np,
     pd,
 ):
-    def _residual_stats(T, R, target_mohm):
-        fit = fit_spline(T, R, target_mohm=target_mohm)
-        residual = (fit["R"] - fit["spline"](fit["T"])) * 1e3
+    def _residual_stats(T, R, window_K):
+        fit = fit_savgol(T, R, window_K=window_K)
+        residual = (fit["R"] - np.interp(fit["T"], fit["T_grid"], fit["R_grid"])) * 1e3
         window = max(5, len(residual) // 8)
         if window % 2 == 0:
             window += 1
@@ -490,7 +544,7 @@ def _spline_diagnostics(
             max_rolling_mean_mohm=float(np.nanmax(np.abs(rolling))),
         )
 
-    def _blocked_holdout_rms(T, R, target_mohm, blocks=5):
+    def _blocked_holdout_rms(T, R, window_K, blocks=5):
         T = np.asarray(T, dtype=float)
         R = np.asarray(R, dtype=float)
         errors = []
@@ -499,8 +553,9 @@ def _spline_diagnostics(
             train = ~test
             if train.sum() < 8 or test.sum() == 0:
                 continue
-            fit = fit_spline(T[train], R[train], target_mohm=target_mohm)
-            errors.extend(((R[test] - fit["spline"](T[test])) * 1e3).tolist())
+            fit = fit_savgol(T[train], R[train], window_K=window_K)
+            predicted = np.interp(T[test], fit["T_grid"], fit["R_grid"])
+            errors.extend(((R[test] - predicted) * 1e3).tolist())
         errors = np.asarray(errors, dtype=float)
         return float(np.sqrt(np.mean(errors**2))) if len(errors) else float("nan")
 
@@ -509,15 +564,16 @@ def _spline_diagnostics(
         meta = _df.iloc[0]
         T = _df["temperature_K"].to_numpy(dtype=float)
         R = _df["resistance_ohm"].to_numpy(dtype=float)
-        stats = _residual_stats(T, R, SPLINE_TARGET_MOHM)
+        stats = _residual_stats(T, R, SG_WINDOW_K)
         rows.append({
             "I (mA)": int(meta["sample_current_mA_nominal"]),
             "sweep": meta["direction"],
             "field": meta["field_condition"],
-            "spline k": str(SPLINE_DEGREE),
-            "target (mOhm)": f"{SPLINE_TARGET_MOHM:.2f}",
+            "method": "Savitzky-Golay",
+            "polyorder": str(SG_POLYORDER),
+            "window (K)": f"{SG_WINDOW_K:.2f}",
             "RMS resid (mOhm)": f"{stats['rms_mohm']:.3f}",
-            "holdout RMS (mOhm)": f"{_blocked_holdout_rms(T, R, SPLINE_TARGET_MOHM):.3f}",
+            "holdout RMS (mOhm)": f"{_blocked_holdout_rms(T, R, SG_WINDOW_K):.3f}",
             "max |resid| (mOhm)": f"{stats['max_abs_mohm']:.3f}",
             "max rolling mean (mOhm)": f"{stats['max_rolling_mean_mohm']:.3f}",
         })
@@ -748,9 +804,10 @@ def _md_plot_guide(mo, tc_summary):
     mo.md(rf"""
     ## Main Comparisons
 
-    In each figure, the upper panel is the measured $R(T)$ curve with its spline
-    fit, the middle panel is the residual $R-\hat R$, and the lower panel is the
-    spline derivative. Dashed colored lines mark $T_c$. The shaded bands in the
+    In each figure, the upper panel is the measured $R(T)$ curve with the
+    Savitzky--Golay smoothed curve, the middle panel is the residual
+    $R-\hat R$, and the lower panel is the local-polynomial derivative.
+    Dashed colored lines mark $T_c$. The shaded bands in the
     derivative panel show the wider $T_c\pm\Delta T$ scale-setting interval; the
     quoted uncertainty is the Gaussian standard uncertainty
     $\sigma_{{T_c}}=\Delta T/2$. All comparisons below are comparisons of this
@@ -894,7 +951,7 @@ def _md_final(mo, reported_tc):
 
     {_reported} The table keeps the readable per-run result in the notebook. The
     exported CSVs in `results/part_a/` include the interval components
-    and spline diagnostics.
+    and Savitzky--Golay diagnostics.
     """)
     return
 
@@ -924,7 +981,7 @@ def _final_table(pd, tc_summary):
             "sampling sigma [K]": f"{_r['tc_sampling_sigma_K']:.2f}",
             "transition Delta [K]": f"{_r['tc_interval_delta_K']:.2f}",
             "sigma [K]": f"{_r['tc_sigma_K']:.2f}",
-            "fit RMS [mOhm]": f"{_r['spline_rmse_mohm']:.3f}",
+            "fit RMS [mOhm]": f"{_r['sg_rmse_mohm']:.3f}",
         })
     final_table = pd.DataFrame(_rows)
     return (final_table,)
@@ -1052,7 +1109,7 @@ def _summary_plot(
 @app.cell
 def _write(OUT_DIR, spline_diagnostics, tc_summary):
     tc_path = OUT_DIR / "tc_summary.csv"
-    diagnostics_path = OUT_DIR / "spline_diagnostics.csv"
+    diagnostics_path = OUT_DIR / "savgol_diagnostics.csv"
     tc_summary.to_csv(tc_path, index=False)
     spline_diagnostics.to_csv(diagnostics_path, index=False)
     return

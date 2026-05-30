@@ -1,8 +1,8 @@
 measurement_id,data_file,source_file,sample_current_mA_nominal,series_resistor,direction,field_condition,temperature_min_K,temperature_max_K,points
+partA_100mA_100ohm_heat_magnet,measurements/partA_100mA_100ohm_heat_magnet.csv,100ma_100ohm_heat_magnet_2026.05.17T10.47.44.xlsx,100.0,100ohm,heat,magnet,80.15998900000002,104.869241,137
 partA_100mA_100ohm_heat_nomagnet,measurements/partA_100mA_100ohm_heat_nomagnet.csv,100ma_100ohm_heat_2026.05.17T10.27.32.xlsx,100.0,100ohm,heat,no_magnet,80.01937900000001,104.799959,103
-partA_100mA_100ohm_heat_magnet,measurements/partA_100mA_100ohm_heat_magnet.csv,100ma_100ohm_heat_magnet_2026.05.17T10.47.44.xlsx,100.0,100ohm,heat,magnet,80.15998900000002,100.127355,107
-partA_170mA_100ohm_cool_nomagnet,measurements/partA_170mA_100ohm_cool_nomagnet.csv,170ma_100ohm_cool_2026.05.17T09.07.00.xlsx,170.0,100ohm,cool,no_magnet,80.02356900000004,104.345613,71
+partA_170mA_100ohm_cool_nomagnet,measurements/partA_170mA_100ohm_cool_nomagnet.csv,170ma_100ohm_cool_2026.05.17T09.07.00.xlsx,170.0,100ohm,cool,no_magnet,80.02356900000004,104.345613,72
 partA_240mA_100ohm_cool_nomagnet,measurements/partA_240mA_100ohm_cool_nomagnet.csv,240ma_100ohm_cool_2026.05.17T08.54.56.xlsx,240.0,100ohm,cool,no_magnet,80.00225000000003,104.595798,89
-partA_30mA_1kohm_cool_nomagnet,measurements/partA_30mA_1kohm_cool_nomagnet.csv,30ma_1kohm_cool_2026.05.17T10.10.17.xlsx,30.0,1kohm,cool,no_magnet,80.01021300000002,99.71638900000002,104
-partA_30mA_1kohm_heat_nomagnet,measurements/partA_30mA_1kohm_heat_nomagnet.csv,30ma_1kohm_heat_2026.05.17T10.12.08.xlsx,30.0,1kohm,heat,no_magnet,80.17553600000002,104.740923,93
-partA_69mA_100ohm_heat_nomagnet,measurements/partA_69mA_100ohm_heat_nomagnet.csv,69ma_100ohm_heat_2026.05.17T08.59.21.xlsx,69.0,100ohm,heat,no_magnet,80.11869300000004,104.840431,85
+partA_30mA_1kohm_cool_nomagnet,measurements/partA_30mA_1kohm_cool_nomagnet.csv,30ma_1kohm_cool_2026.05.17T10.10.17.xlsx,30.0,1kohm,cool,no_magnet,80.01021300000002,104.492285,116
+partA_30mA_1kohm_heat_nomagnet,measurements/partA_30mA_1kohm_heat_nomagnet.csv,30ma_1kohm_heat_2026.05.17T10.12.08.xlsx,30.0,1kohm,heat,no_magnet,80.17553600000002,104.740923,96
+partA_69mA_100ohm_heat_nomagnet,measurements/partA_69mA_100ohm_heat_nomagnet.csv,69ma_100ohm_heat_2026.05.17T08.59.21.xlsx,69.0,100ohm,heat,no_magnet,80.11869300000004,104.840431,88
