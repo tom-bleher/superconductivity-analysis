@@ -24,7 +24,7 @@ def _md_intro(mo):
     $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ sample while sweeping through the
     superconducting transition.
 
-    The transition is broad enough that a fixed resistance threshold would be
+    The transition is broad enough that a fixed resistance level would be
     arbitrary, so each run is summarized by one operational resistive transition
     temperature: the steepest point of a smoothed $R(T)$ curve,
     $$T_c = \arg\max_T R'(T).$$
@@ -43,7 +43,7 @@ def _imports():
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from scipy.interpolate import UnivariateSpline
-    from scipy.optimize import brentq, minimize_scalar
+    from scipy.optimize import minimize_scalar
 
     plt.rcParams.update({
         "font.size": 10,
@@ -64,17 +64,7 @@ def _imports():
         "savefig.dpi": 200,
         "figure.facecolor": "white",
     })
-    return (
-        Line2D,
-        Path,
-        UnivariateSpline,
-        brentq,
-        minimize_scalar,
-        mo,
-        np,
-        pd,
-        plt,
-    )
+    return Line2D, Path, UnivariateSpline, minimize_scalar, mo, np, pd, plt
 
 
 @app.cell
@@ -91,7 +81,6 @@ def _paths(Path):
 def _constants():
     SPLINE_DEGREE = 3
     SPLINE_TARGET_MOHM = 0.04
-    TRANSITION_DERIVATIVE_FRACTION = 0.80
     SPLINE_GRID_POINTS = 2000
     SPLINE_BRACKET_STEPS = 12
     return (
@@ -99,7 +88,6 @@ def _constants():
         SPLINE_DEGREE,
         SPLINE_GRID_POINTS,
         SPLINE_TARGET_MOHM,
-        TRANSITION_DERIVATIVE_FRACTION,
     )
 
 
@@ -109,8 +97,8 @@ def _instrument(np):
 
     Rigol DM3058 5.5-digit DMM uncertainties are accuracy and last-digit
     resolution in quadrature. Resistance uncertainty is propagated directly
-    from R = V/I. Temperature uncertainty is the local neighbor-to-neighbor
-    temperature span, modeled as a uniform distribution.
+    from R = V/I. Temperature uncertainty is the local midpoint-to-midpoint bin
+    around each measured temperature, modeled as a uniform distribution.
     """
     V_RANGE, V_LSD = 0.1, 1e-6
     V_RES = V_LSD / np.sqrt(12.0)
@@ -152,7 +140,7 @@ def _instrument(np):
         if len(T_sorted) > 2:
             width[1:-1] = T_sorted[2:] - T_sorted[:-2]
 
-        sigma_sorted = np.abs(width) / np.sqrt(12.0)
+        sigma_sorted = np.abs(width) / (2.0 * np.sqrt(12.0))
         sigma = np.empty_like(sigma_sorted)
         sigma[order] = sigma_sorted
         return sigma
@@ -189,7 +177,7 @@ def _load(MEAS_DIR, pd):
 
 
 @app.cell
-def _md_tc_methods(SPLINE_TARGET_MOHM, TRANSITION_DERIVATIVE_FRACTION, mo):
+def _md_tc_methods(SPLINE_TARGET_MOHM, mo):
     mo.md(rf"""
     ## Method
 
@@ -206,26 +194,30 @@ def _md_tc_methods(SPLINE_TARGET_MOHM, TRANSITION_DERIVATIVE_FRACTION, mo):
 
     $$T_c = \arg\max_T \hat R'(T).$$
 
-    The reported uncertainty is an operational uncertainty for assigning one
-    number to a broad transition:
+    The reported interval is an operational interval for assigning one number
+    to a broad transition.
 
-    $$\sigma_{{T_c}} = \sqrt{{\sigma_\mathrm{{sampling}}^2 + \sigma_\mathrm{{transition}}^2}}.$$
+    The finite temperature sampling is reported separately. At the measured
+    point nearest $T_c$, the local midpoint-to-midpoint bin has width
+    $(T_{{i+1}}-T_{{i-1}})/2$. Modeling the unknown location inside that bin as
+    uniform gives
+    $\sigma_\mathrm{{sampling}}=(T_{{i+1}}-T_{{i-1}})/(2\sqrt{{12}})$.
 
-    $\sigma_\mathrm{{sampling}}$ is a conservative temperature-location term from
-    the finite temperature sampling. At the measured point nearest $T_c$, the
-    local span is taken as $T_{{i+1}}-T_{{i-1}}$ and modeled as a uniform
-    interval, giving
-    $\sigma_\mathrm{{sampling}}=(T_{{i+1}}-T_{{i-1}})/\sqrt{{12}}$.
-
-    $\sigma_\mathrm{{transition}}$ describes how broad the derivative peak is.
+    $\Delta T$ describes how broad the derivative peak is.
     A sharper transition gives a smaller ambiguity in the single reported
-    $T_c$; a broad peak gives a larger one. Find $T_L$ and $T_R$ where
-    $\hat R'(T) = {TRANSITION_DERIVATIVE_FRACTION:g}\,\hat R'(T_c)$, make the
-    interval symmetric with
-    $\Delta T = \max(T_c - T_L, T_R - T_c)$, and treat that interval as uniform:
+    $T_c$; a broad peak gives a larger one. Let
+    $g(T)=\hat R'(T)$. We use the central concave-down part of the derivative
+    peak: $T_L$ and $T_R$ are the nearest temperatures around $T_c$ where the
+    curvature of $g$ changes sign,
+    $$g''(T)=\hat R'''(T)=0.$$
+    Inside this interval, the derivative peak is locally peak-like and
+    approximately parabolic. Since the measured peak does not need to be
+    symmetric, the quoted half-width is
 
-    $$\sigma_\mathrm{{transition}} =
-    \frac{{2\Delta T}}{{\sqrt{{12}}}}.$$
+    $$\Delta T =
+    \max\left(T_c-T_L,\;T_R-T_c\right).$$
+
+    We report $T_c\pm\Delta T$.
     """)
     return
 
@@ -293,10 +285,7 @@ def _spline_model_helpers(
 
 @app.cell
 def _analysis(
-    SPLINE_GRID_POINTS,
     SPLINE_TARGET_MOHM,
-    TRANSITION_DERIVATIVE_FRACTION,
-    brentq,
     derivative_peak,
     fit_spline,
     measurements,
@@ -306,78 +295,87 @@ def _analysis(
 ):
     """Analyze each run once; the summary is the single source of truth."""
 
-    def _derivative_level_temperature(d_spline, T_grid, level, tc, side):
-        values = np.asarray(d_spline(T_grid) - level, dtype=float)
-        roots = []
+    def _linear_zero(T0, y0, T1, y1):
+        if y1 == y0:
+            return float(0.5 * (T0 + T1))
+        return float(T0 - y0 * (T1 - T0) / (y1 - y0))
 
-        exact = np.flatnonzero(np.isclose(values, 0.0, atol=1e-14))
-        roots.extend(float(T_grid[i]) for i in exact)
-
-        finite = np.isfinite(values)
-        crossing = np.flatnonzero(
-            finite[:-1] & finite[1:] & (values[:-1] * values[1:] < 0)
-        )
-        for i in crossing:
-            roots.append(
-                brentq(
-                    lambda _T, _level=level: float(d_spline(_T) - _level),
-                    T_grid[i],
-                    T_grid[i + 1],
-                )
-            )
+    def _curvature_zero_temperature(T_grid, curvature, i_center, side):
+        finite = np.isfinite(curvature)
 
         if side == "left":
-            sided = [root for root in roots if root <= tc]
-            if sided:
-                return float(max(sided))
-        elif side == "right":
-            sided = [root for root in roots if root >= tc]
-            if sided:
-                return float(min(sided))
-
-        if roots:
-            return float(min(roots, key=lambda root: abs(root - tc)))
-
-        if side == "left":
-            mask = T_grid <= tc
-        elif side == "right":
-            mask = T_grid >= tc
+            for i in range(i_center, 0, -1):
+                if (
+                    finite[i]
+                    and finite[i - 1]
+                    and curvature[i] < 0 <= curvature[i - 1]
+                ):
+                    return _linear_zero(
+                        T_grid[i - 1],
+                        curvature[i - 1],
+                        T_grid[i],
+                        curvature[i],
+                    )
+            mask = finite & (T_grid <= T_grid[i_center])
         else:
-            mask = np.ones_like(T_grid, dtype=bool)
-        if not np.any(mask):
-            mask = np.ones_like(T_grid, dtype=bool)
-        local_T = T_grid[mask]
-        local_values = values[mask]
-        return float(local_T[int(np.nanargmin(np.abs(local_values)))])
+            for i in range(i_center, len(T_grid) - 1):
+                if (
+                    finite[i]
+                    and finite[i + 1]
+                    and curvature[i] < 0 <= curvature[i + 1]
+                ):
+                    return _linear_zero(
+                        T_grid[i],
+                        curvature[i],
+                        T_grid[i + 1],
+                        curvature[i + 1],
+                    )
+            mask = finite & (T_grid >= T_grid[i_center])
 
-    def _transition_width_uncertainty(fit, tc, dR_peak):
-        T, spline = fit["T"], fit["spline"]
-        d_spline = spline.derivative()
-        threshold = TRANSITION_DERIVATIVE_FRACTION * dR_peak
-        search_T = np.linspace(float(T.min()), float(T.max()), SPLINE_GRID_POINTS)
-        T_threshold_left = _derivative_level_temperature(
-            d_spline, search_T, threshold, tc, "left"
+        local_T = T_grid[mask]
+        local_curvature = curvature[mask]
+        if len(local_T) == 0:
+            return float(T_grid[i_center])
+        return float(local_T[int(np.nanargmin(np.abs(local_curvature)))])
+
+    def _transition_interval(tc, T_grid, dR_grid):
+        curvature = np.gradient(
+            np.gradient(dR_grid, T_grid, edge_order=2),
+            T_grid,
+            edge_order=2,
         )
-        T_threshold_right = _derivative_level_temperature(
-            d_spline, search_T, threshold, tc, "right"
-        )
-        delta = float(max(abs(tc - T_threshold_left), abs(T_threshold_right - tc)))
-        T_left = float(tc - delta)
-        T_right = float(tc + delta)
-        width = float(2.0 * delta)
-        sigma = width / np.sqrt(12.0)
+        finite = np.isfinite(curvature)
+        i_center = int(np.nanargmin(np.abs(T_grid - tc)))
+
+        if not (finite[i_center] and curvature[i_center] < 0):
+            concave_down = np.flatnonzero(finite & (curvature < 0))
+            if len(concave_down):
+                i_center = int(
+                    concave_down[np.argmin(np.abs(T_grid[concave_down] - tc))]
+                )
+
+        T_left = _curvature_zero_temperature(T_grid, curvature, i_center, "left")
+        T_right = _curvature_zero_temperature(T_grid, curvature, i_center, "right")
+        if T_right < T_left:
+            T_left, T_right = T_right, T_left
+
+        delta = float(max(abs(tc - T_left), abs(T_right - tc)))
+        interval_left = float(tc - delta)
+        interval_right = float(tc + delta)
+        interval_width = float(2.0 * delta)
+        curvature_width = float(T_right - T_left)
 
         detail = dict(
-            T_left=T_left,
-            T_right=T_right,
-            T_threshold_left=T_threshold_left,
-            T_threshold_right=T_threshold_right,
-            threshold=threshold,
-            derivative_fraction=TRANSITION_DERIVATIVE_FRACTION,
+            T_left=interval_left,
+            T_right=interval_right,
+            curvature_left=T_left,
+            curvature_right=T_right,
+            curvature_width_K=curvature_width,
             delta_K=delta,
-            width_K=width,
+            width_K=interval_width,
+            curvature_at_center=float(curvature[i_center]),
         )
-        return sigma, width, detail
+        return delta, interval_width, detail
 
     def analyze_run(measurement_id, df):
         meta = df.iloc[0]
@@ -385,25 +383,24 @@ def _analysis(
         R = df["resistance_ohm"].to_numpy(dtype=float)
 
         fit = fit_spline(T, R, target_mohm=SPLINE_TARGET_MOHM)
-        tc, dR_peak, T_grid, dR_grid = derivative_peak(
+        tc, _dR_peak, T_grid, dR_grid = derivative_peak(
             fit["spline"],
             fit["T"].min(),
             fit["T"].max(),
         )
 
-        sigma_transition, transition_width, transition_detail = (
-            _transition_width_uncertainty(fit, tc, dR_peak)
+        interval_delta, interval_width, interval_detail = (
+            _transition_interval(tc, T_grid, dR_grid)
         )
         sigma_sampling = sigma_T_at(fit["T"], tc)
-        tc_err = float(np.hypot(sigma_sampling, sigma_transition))
 
         overlay = dict(
             T=T_grid,
             R=fit["spline"](T_grid),
             dR_dT=dR_grid,
             tc=tc,
-            transition_Tleft=transition_detail["T_left"],
-            transition_Tright=transition_detail["T_right"],
+            transition_Tleft=interval_detail["T_left"],
+            transition_Tright=interval_detail["T_right"],
         )
 
         record = dict(
@@ -413,16 +410,21 @@ def _analysis(
             direction=meta["direction"],
             field_condition=meta["field_condition"],
             tc_K=tc,
-            tc_err_K=tc_err,
-            tc_sampling_err_K=sigma_sampling,
-            tc_transition_err_K=sigma_transition,
-            tc_transition_width_K=transition_width,
-            tc_transition_delta_K=transition_detail["delta_K"],
-            tc_transition_left_K=transition_detail["T_left"],
-            tc_transition_right_K=transition_detail["T_right"],
-            tc_derivative_threshold_fraction=transition_detail["derivative_fraction"],
-            tc_derivative_threshold_left_K=transition_detail["T_threshold_left"],
-            tc_derivative_threshold_right_K=transition_detail["T_threshold_right"],
+            tc_delta_K=interval_delta,
+            tc_sampling_sigma_K=sigma_sampling,
+            tc_interval_delta_K=interval_detail["delta_K"],
+            tc_interval_width_K=interval_width,
+            tc_interval_left_K=interval_detail["T_left"],
+            tc_interval_right_K=interval_detail["T_right"],
+            tc_interval_method="derivative_curvature_zero_crossing",
+            tc_derivative_curvature_left_K=interval_detail["curvature_left"],
+            tc_derivative_curvature_right_K=interval_detail["curvature_right"],
+            tc_derivative_curvature_width_K=interval_detail[
+                "curvature_width_K"
+            ],
+            tc_derivative_curvature_at_center=interval_detail[
+                "curvature_at_center"
+            ],
             spline_target_mohm=SPLINE_TARGET_MOHM,
             spline_rmse_mohm=fit["rmse_mohm"],
         )
@@ -681,7 +683,7 @@ def _dir_styles():
 
 
 @app.cell
-def _md_plot_guide(TRANSITION_DERIVATIVE_FRACTION, mo, tc_summary):
+def _md_plot_guide(mo, tc_summary):
     def _one(current_mA, direction, field):
         _row = tc_summary[
             (tc_summary["sample_current_mA_nominal"] == current_mA)
@@ -704,9 +706,9 @@ def _md_plot_guide(TRANSITION_DERIVATIVE_FRACTION, mo, tc_summary):
 
     In each figure, the upper panel is the measured $R(T)$ curve with its spline
     fit, and the lower panel is the spline derivative. Dashed lines mark $T_c$.
-    The shaded bands show the symmetric
-    ${TRANSITION_DERIVATIVE_FRACTION:g}R'(T_c)$ derivative width used for
-    $\sigma_\mathrm{{transition}}$. All comparisons below are comparisons of this
+    The shaded bands show the central concave-down interval of the derivative
+    peak used for the symmetric $T_c\pm\Delta T$ interval. All comparisons
+    below are comparisons of this
     operational resistive $T_c$ under different sweep, current, and field
     conditions.
 
@@ -815,19 +817,19 @@ def _reported_tc(np, tc_summary):
         & (tc_summary["field_condition"] == "no_magnet")
     ]
     if set(_anchor["direction"]) >= {"heat", "cool"}:
-        _sigma = _anchor["tc_err_K"].to_numpy(dtype=float)
+        _half_width = _anchor["tc_delta_K"].to_numpy(dtype=float)
         _value = _anchor["tc_K"].to_numpy(dtype=float)
-        _valid = np.isfinite(_sigma) & (_sigma > 0) & np.isfinite(_value)
+        _valid = np.isfinite(_half_width) & (_half_width > 0) & np.isfinite(_value)
         if np.any(_valid):
-            _weights = 1.0 / _sigma[_valid] ** 2
+            _weights = 1.0 / _half_width[_valid] ** 2
             reported_tc = dict(
                 tc_K=float(np.average(_value[_valid], weights=_weights)),
-                err_K=float(np.sqrt(1.0 / np.sum(_weights))),
+                delta_K=float(np.sqrt(1.0 / np.sum(_weights))),
             )
         else:
             reported_tc = dict(
                 tc_K=float(_anchor["tc_K"].mean()),
-                err_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
+                delta_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
             )
     else:
         reported_tc = None
@@ -837,8 +839,8 @@ def _reported_tc(np, tc_summary):
 @app.cell
 def _md_final(mo, reported_tc):
     _reported = (
-        rf"The inverse-variance weighted low-current, zero-field pair gives "
-        rf"$T_c = {reported_tc['tc_K']:.2f}\pm{reported_tc['err_K']:.2f}\,\mathrm{{K}}$."
+        rf"The $1/\Delta T^2$ weighted low-current, zero-field pair gives "
+        rf"$T_c = {reported_tc['tc_K']:.2f}\pm{reported_tc['delta_K']:.2f}\,\mathrm{{K}}$."
         if reported_tc is not None
         else "The table below reports each run individually."
     )
@@ -846,7 +848,7 @@ def _md_final(mo, reported_tc):
     ## Results
 
     {_reported} The table keeps the readable per-run result in the notebook. The
-    exported CSVs in `results/part_a/` include the full uncertainty components
+    exported CSVs in `results/part_a/` include the interval components
     and spline diagnostics.
     """)
     return
@@ -865,9 +867,17 @@ def _final_table(pd, tc_summary):
     for _, _r in tc_summary.sort_values("tc_K").iterrows():
         _rows.append({
             "condition": _condition(_r),
-            "Tc +/- sigma [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_err_K']:.2f}",
-            "sigma samp [K]": f"{_r['tc_sampling_err_K']:.2f}",
-            "sigma width [K]": f"{_r['tc_transition_err_K']:.2f}",
+            "Tc +/- Delta [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_delta_K']:.2f}",
+            "symmetric interval [K]": (
+                f"{_r['tc_interval_left_K']:.2f}"
+                f" - {_r['tc_interval_right_K']:.2f}"
+            ),
+            "curvature interval [K]": (
+                f"{_r['tc_derivative_curvature_left_K']:.2f}"
+                f" - {_r['tc_derivative_curvature_right_K']:.2f}"
+            ),
+            "sampling sigma [K]": f"{_r['tc_sampling_sigma_K']:.2f}",
+            "Delta [K]": f"{_r['tc_interval_delta_K']:.2f}",
             "fit RMS [mOhm]": f"{_r['spline_rmse_mohm']:.3f}",
         })
     final_table = pd.DataFrame(_rows)
@@ -907,10 +917,10 @@ def _summary_plot(
     fig, ax = plt.subplots(figsize=(7.0, 3.9))
     if reported_tc is not None:
         _final_tc = reported_tc["tc_K"]
-        _final_err = reported_tc["err_K"]
+        _final_delta = reported_tc["delta_K"]
         ax.axvspan(
-            _final_tc - _final_err,
-            _final_tc + _final_err,
+            _final_tc - _final_delta,
+            _final_tc + _final_delta,
             color="#f2b134",
             alpha=0.18,
             lw=0,
@@ -925,7 +935,7 @@ def _summary_plot(
             zorder=1,
         )
         ax.set_title(
-            rf"weighted low-current estimate: ${_final_tc:.2f}\pm{_final_err:.2f}$ K",
+            rf"weighted low-current estimate: ${_final_tc:.2f}\pm{_final_delta:.2f}$ K",
             fontsize=10,
             color="#6f4e00",
             pad=8,
@@ -935,7 +945,7 @@ def _summary_plot(
         _color, _marker, _ = DIR_STYLES[_r["direction"]]
         _is_anchor = bool(_anchor_mask.iloc[_i])
         ax.errorbar(
-            _r["tc_K"], _i, xerr=_r["tc_err_K"],
+            _r["tc_K"], _i, xerr=_r["tc_delta_K"],
             fmt=_marker, ms=7.2 if _is_anchor else 5.6,
             color=_color, alpha=1.0 if _is_anchor else 0.78,
             mfc=_color, mec="#222222" if _is_anchor else _color,
@@ -944,7 +954,7 @@ def _summary_plot(
             capsize=0, zorder=5 if _is_anchor else 3,
         )
         ax.text(
-            _r["tc_K"] + _r["tc_err_K"] + 0.18, _i,
+            _r["tc_K"] + _r["tc_delta_K"] + 0.18, _i,
             rf"${_r['tc_K']:.2f}$", va="center", ha="left",
             fontsize=8.2 if _is_anchor else 8,
             fontweight="bold" if _is_anchor else "regular",
@@ -964,8 +974,8 @@ def _summary_plot(
             _tick.set_color("#222222")
     ax.set_ylim(-0.6, len(_df) - 0.4)
     ax.set_xlabel(r"$T_c\;\;(\mathrm{K})$")
-    _lo = float((_df["tc_K"] - _df["tc_err_K"]).min())
-    _hi = float((_df["tc_K"] + _df["tc_err_K"]).max())
+    _lo = float((_df["tc_K"] - _df["tc_delta_K"]).min())
+    _hi = float((_df["tc_K"] + _df["tc_delta_K"]).max())
     ax.set_xlim(_lo - 0.6, _hi + 1.6)
     ax.grid(True, axis="x", alpha=0.1, lw=0.5)
     ax.tick_params(axis="x", direction="in", length=3, top=False)
