@@ -20,14 +20,14 @@ def _md_intro(mo):
     mo.md(r"""
     # Superconductivity — Part A
 
-    Four-probe resistance $R(T)$ of a $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ sample
-    is measured across the superconducting transition.
+    We measured the four-probe resistance of a
+    $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ sample while sweeping through the
+    superconducting transition.
 
-    Each run reports a single transition temperature, the point of steepest
-    ascent of a cubic smoothing spline through $R(T)$,
+    The transition is broad enough that a fixed resistance threshold would be
+    arbitrary, so each run is summarized by the steepest point of a smoothed
+    $R(T)$ curve:
     $$T_c = \arg\max_T R'(T).$$
-    This avoids resistance-threshold choices and fixes the analysis to one
-    estimator, one smoothing rule, and one uncertainty budget.
     """)
     return
 
@@ -41,7 +41,7 @@ def _imports():
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from scipy.interpolate import UnivariateSpline
-    from scipy.optimize import minimize_scalar
+    from scipy.optimize import brentq, minimize_scalar
 
     plt.rcParams.update({
         "font.size": 10,
@@ -62,7 +62,17 @@ def _imports():
         "savefig.dpi": 200,
         "figure.facecolor": "white",
     })
-    return Line2D, Path, UnivariateSpline, minimize_scalar, mo, np, pd, plt
+    return (
+        Line2D,
+        Path,
+        UnivariateSpline,
+        brentq,
+        minimize_scalar,
+        mo,
+        np,
+        pd,
+        plt,
+    )
 
 
 @app.cell
@@ -79,15 +89,15 @@ def _paths(Path):
 def _constants():
     SPLINE_DEGREE = 3
     SPLINE_TARGET_MOHM = 0.04
-    SPLINE_SENSITIVITY_TARGETS_MOHM = (0.04, 0.05, 0.06)
+    TRANSITION_DERIVATIVE_FRACTION = 0.80
     SPLINE_GRID_POINTS = 2000
     SPLINE_BRACKET_STEPS = 12
     return (
         SPLINE_BRACKET_STEPS,
         SPLINE_DEGREE,
         SPLINE_GRID_POINTS,
-        SPLINE_SENSITIVITY_TARGETS_MOHM,
         SPLINE_TARGET_MOHM,
+        TRANSITION_DERIVATIVE_FRACTION,
     )
 
 
@@ -97,9 +107,8 @@ def _instrument(np):
 
     Rigol DM3058 5.5-digit DMM uncertainties are accuracy and last-digit
     resolution in quadrature. Resistance uncertainty is propagated directly
-    from R = V/I. Temperature uncertainty is the local sampling-bin width,
-    modeled as a uniform distribution over the Voronoi cell around each logged
-    temperature point.
+    from R = V/I. Temperature uncertainty is the local neighbor-to-neighbor
+    temperature span, modeled as a uniform distribution.
     """
     V_RANGE, V_LSD = 0.1, 1e-6
     V_RES = V_LSD / np.sqrt(12.0)
@@ -108,19 +117,25 @@ def _instrument(np):
         V = np.asarray(V, dtype=float)
         return np.sqrt((0.00015 * np.abs(V) + 0.00004 * V_RANGE) ** 2 + V_RES**2)
 
-    def sigma_I(I):
-        I = np.asarray(I, dtype=float)
-        I_RANGE = np.where(np.abs(I) <= 0.2, 0.2, 2.0)
+    def sigma_current(current):
+        current = np.asarray(current, dtype=float)
+        I_RANGE = np.where(np.abs(current) <= 0.2, 0.2, 2.0)
         I_RES = np.where(
-            np.abs(I) <= 0.2,
+            np.abs(current) <= 0.2,
             1e-6 / np.sqrt(12.0),
             1e-5 / np.sqrt(12.0),
         )
-        return np.sqrt((0.0025 * np.abs(I) + 0.00020 * I_RANGE) ** 2 + I_RES**2)
+        return np.sqrt(
+            (0.0025 * np.abs(current) + 0.00020 * I_RANGE) ** 2 + I_RES**2
+        )
 
-    def sigma_R(V, I):
-        V, I = np.asarray(V, dtype=float), np.asarray(I, dtype=float)
-        return np.sqrt((sigma_V(V) / I) ** 2 + (V * sigma_I(I) / I**2) ** 2)
+    def sigma_R(voltage, current):
+        voltage = np.asarray(voltage, dtype=float)
+        current = np.asarray(current, dtype=float)
+        return np.sqrt(
+            (sigma_V(voltage) / current) ** 2
+            + (voltage * sigma_current(current) / current**2) ** 2
+        )
 
     def sigma_T_local(T):
         T = np.asarray(T, dtype=float)
@@ -133,7 +148,7 @@ def _instrument(np):
         width[0] = T_sorted[1] - T_sorted[0]
         width[-1] = T_sorted[-1] - T_sorted[-2]
         if len(T_sorted) > 2:
-            width[1:-1] = 0.5 * (T_sorted[2:] - T_sorted[:-2])
+            width[1:-1] = T_sorted[2:] - T_sorted[:-2]
 
         sigma_sorted = np.abs(width) / np.sqrt(12.0)
         sigma = np.empty_like(sigma_sorted)
@@ -147,7 +162,7 @@ def _instrument(np):
         sigma_T = sigma_T_local(T)
         return float(sigma_T[int(np.nanargmin(np.abs(T - T0)))])
 
-    return sigma_I, sigma_R, sigma_T_at, sigma_T_local, sigma_V
+    return sigma_R, sigma_T_at, sigma_T_local
 
 
 @app.cell
@@ -172,34 +187,29 @@ def _load(MEAS_DIR, pd):
 
 
 @app.cell
-def _md_tc_methods(SPLINE_SENSITIVITY_TARGETS_MOHM, SPLINE_TARGET_MOHM, mo):
-    _target_list = ", ".join(f"{_t:g}" for _t in SPLINE_SENSITIVITY_TARGETS_MOHM)
+def _md_tc_methods(SPLINE_TARGET_MOHM, TRANSITION_DERIVATIVE_FRACTION, mo):
     mo.md(rf"""
     ## Method
 
-    Each run $R(T)$ is fit with a cubic smoothing spline $\hat R$ using SciPy's
-    [`UnivariateSpline`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.UnivariateSpline.html),
-    targeting an RMS residual of
-    $\sigma_\mathrm{{target}} = {SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$ —
-    a level chosen by testing a few values, smooth enough to suppress
-    point-to-point noise while staying on the measured shoulders. The transition
-    temperature is the steepest-ascent point,
+    For each run, fit a cubic smoothing spline $\hat R(T)$ with target RMS
+    residual ${SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$. Then find the maximum
+    of the analytic derivative:
 
-    $$T_c = \arg\max_{{T}} \hat R{{}}'(T),$$
+    $$T_c = \arg\max_T \hat R'(T).$$
 
-    found on a dense grid and refined by bounded maximization of the analytic
-    derivative.
+    The reported uncertainty has two pieces:
 
-    Its uncertainty combines two terms in quadrature,
+    $$\sigma_{{T_c}} = \sqrt{{\sigma_\mathrm{{sampling}}^2 + \sigma_\mathrm{{transition}}^2}}.$$
 
-    $$\sigma_{{T_c}} = \sqrt{{\sigma_\mathrm{{sampling}}^2 + \sigma_\mathrm{{smoothing}}^2}}.$$
+    $\sigma_\mathrm{{sampling}}$ is set by the local temperature spacing near
+    $T_c$. $\sigma_\mathrm{{transition}}$ describes how wide the derivative peak
+    is: find $T_L$ and $T_R$ where
+    $\hat R'(T) = {TRANSITION_DERIVATIVE_FRACTION:g}\,\hat R'(T_c)$, make the
+    interval symmetric with
+    $\Delta T = \max(T_c - T_L, T_R - T_c)$, and treat that interval as uniform:
 
-    $\sigma_\mathrm{{sampling}} = \dfrac{{T_{{i+1}} - T_{{i-1}}}}{{2\sqrt{{12}}}}$, evaluated
-    at the sample $T_i$ nearest $T_c$, models the local temperature bin as a
-    uniform distribution over the spacing to its neighbors.
-    $\sigma_\mathrm{{smoothing}} = \max_k \lvert T_c(\sigma_k) - T_c \rvert$ is the
-    largest shift in $T_c$ as the target is swept over
-    $\sigma_k \in \{{{_target_list}\}}\,\mathrm{{m}}\Omega$.
+    $$\sigma_\mathrm{{transition}} =
+    \frac{{2\Delta T}}{{\sqrt{{12}}}}.$$
     """)
     return
 
@@ -267,8 +277,10 @@ def _spline_model_helpers(
 
 @app.cell
 def _analysis(
-    SPLINE_SENSITIVITY_TARGETS_MOHM,
+    SPLINE_GRID_POINTS,
     SPLINE_TARGET_MOHM,
+    TRANSITION_DERIVATIVE_FRACTION,
+    brentq,
     derivative_peak,
     fit_spline,
     measurements,
@@ -278,10 +290,78 @@ def _analysis(
 ):
     """Analyze each run once; the summary is the single source of truth."""
 
-    def _tc_for_target(T, R, target_mohm):
-        fit = fit_spline(T, R, target_mohm=target_mohm)
-        tc, _, _, _ = derivative_peak(fit["spline"], fit["T"].min(), fit["T"].max())
-        return tc
+    def _derivative_level_temperature(d_spline, T_grid, level, tc, side):
+        values = np.asarray(d_spline(T_grid) - level, dtype=float)
+        roots = []
+
+        exact = np.flatnonzero(np.isclose(values, 0.0, atol=1e-14))
+        roots.extend(float(T_grid[i]) for i in exact)
+
+        finite = np.isfinite(values)
+        crossing = np.flatnonzero(
+            finite[:-1] & finite[1:] & (values[:-1] * values[1:] < 0)
+        )
+        for i in crossing:
+            roots.append(
+                brentq(
+                    lambda _T, _level=level: float(d_spline(_T) - _level),
+                    T_grid[i],
+                    T_grid[i + 1],
+                )
+            )
+
+        if side == "left":
+            sided = [root for root in roots if root <= tc]
+            if sided:
+                return float(max(sided))
+        elif side == "right":
+            sided = [root for root in roots if root >= tc]
+            if sided:
+                return float(min(sided))
+
+        if roots:
+            return float(min(roots, key=lambda root: abs(root - tc)))
+
+        if side == "left":
+            mask = T_grid <= tc
+        elif side == "right":
+            mask = T_grid >= tc
+        else:
+            mask = np.ones_like(T_grid, dtype=bool)
+        if not np.any(mask):
+            mask = np.ones_like(T_grid, dtype=bool)
+        local_T = T_grid[mask]
+        local_values = values[mask]
+        return float(local_T[int(np.nanargmin(np.abs(local_values)))])
+
+    def _transition_width_uncertainty(fit, tc, dR_peak):
+        T, spline = fit["T"], fit["spline"]
+        d_spline = spline.derivative()
+        threshold = TRANSITION_DERIVATIVE_FRACTION * dR_peak
+        search_T = np.linspace(float(T.min()), float(T.max()), SPLINE_GRID_POINTS)
+        T_threshold_left = _derivative_level_temperature(
+            d_spline, search_T, threshold, tc, "left"
+        )
+        T_threshold_right = _derivative_level_temperature(
+            d_spline, search_T, threshold, tc, "right"
+        )
+        delta = float(max(abs(tc - T_threshold_left), abs(T_threshold_right - tc)))
+        T_left = float(tc - delta)
+        T_right = float(tc + delta)
+        width = float(2.0 * delta)
+        sigma = width / np.sqrt(12.0)
+
+        detail = dict(
+            T_left=T_left,
+            T_right=T_right,
+            T_threshold_left=T_threshold_left,
+            T_threshold_right=T_threshold_right,
+            threshold=threshold,
+            derivative_fraction=TRANSITION_DERIVATIVE_FRACTION,
+            delta_K=delta,
+            width_K=width,
+        )
+        return sigma, width, detail
 
     def analyze_run(measurement_id, df):
         meta = df.iloc[0]
@@ -295,22 +375,19 @@ def _analysis(
             fit["T"].max(),
         )
 
-        target_values = np.array(SPLINE_SENSITIVITY_TARGETS_MOHM, dtype=float)
-        tc_sweep = np.array([
-            _tc_for_target(T, R, target_mohm)
-            for target_mohm in target_values
-        ])
-        finite_tc = tc_sweep[np.isfinite(tc_sweep)]
-        sigma_smoothing = float(np.max(np.abs(finite_tc - tc))) if len(finite_tc) else float("nan")
+        sigma_transition, transition_width, transition_detail = (
+            _transition_width_uncertainty(fit, tc, dR_peak)
+        )
         sigma_sampling = sigma_T_at(fit["T"], tc)
-        tc_err = float(np.hypot(sigma_sampling, sigma_smoothing))
+        tc_err = float(np.hypot(sigma_sampling, sigma_transition))
 
         overlay = dict(
             T=T_grid,
             R=fit["spline"](T_grid),
             dR_dT=dR_grid,
             tc=tc,
-            dR_dT_peak=dR_peak,
+            transition_Tleft=transition_detail["T_left"],
+            transition_Tright=transition_detail["T_right"],
         )
 
         record = dict(
@@ -322,9 +399,15 @@ def _analysis(
             tc_K=tc,
             tc_err_K=tc_err,
             tc_sampling_err_K=sigma_sampling,
-            tc_smoothing_err_K=sigma_smoothing,
+            tc_transition_err_K=sigma_transition,
+            tc_transition_width_K=transition_width,
+            tc_transition_delta_K=transition_detail["delta_K"],
+            tc_transition_left_K=transition_detail["T_left"],
+            tc_transition_right_K=transition_detail["T_right"],
+            tc_derivative_threshold_fraction=transition_detail["derivative_fraction"],
+            tc_derivative_threshold_left_K=transition_detail["T_threshold_left"],
+            tc_derivative_threshold_right_K=transition_detail["T_threshold_right"],
             spline_target_mohm=SPLINE_TARGET_MOHM,
-            spline_sensitivity_targets_mohm=";".join(f"{_t:g}" for _t in target_values),
             spline_rmse_mohm=fit["rmse_mohm"],
         )
         return record, overlay
@@ -342,69 +425,6 @@ def _analysis(
         .reset_index(drop=True)
     )
     return spline_overlays, tc_summary
-
-
-@app.cell
-def _md_error_model(mo):
-    mo.md(r"""
-    ## Measurement Errors
-
-    Voltage and current uncertainties use meter accuracy plus last-digit
-    resolution in quadrature. Resistance is propagated from
-    $R=V/I$:
-
-    $$\sigma_R = \sqrt{\left(\frac{\sigma_V}{I}\right)^2 + \left(\frac{V\sigma_I}{I^2}\right)^2}.$$
-
-    The temperature term below is the typical local sampling-bin uncertainty.
-    """)
-    return
-
-
-@app.cell
-def _error_table(
-    measurements,
-    np,
-    pd,
-    sigma_I,
-    sigma_R,
-    sigma_T_local,
-    sigma_V,
-):
-    _rows = []
-    for _mid, _df in measurements.items():
-        _meta = _df.iloc[0]
-        _V = _df["voltage_V"].to_numpy(dtype=float)
-        _I = _df["current_A"].to_numpy(dtype=float)
-        _T = _df["temperature_K"].to_numpy(dtype=float)
-        _rows.append({
-            "I (mA)": int(_meta["sample_current_mA_nominal"]),
-            "sweep": _meta["direction"],
-            "field": _meta["field_condition"],
-            "typ. sigma V (uV)": f"{np.nanmedian(sigma_V(_V)) * 1e6:.2f}",
-            "typ. sigma I (uA)": f"{np.nanmedian(sigma_I(_I)) * 1e6:.1f}",
-            "typ. sigma R (mOhm)": f"{np.nanmedian(sigma_R(_V, _I)) * 1e3:.3f}",
-            "typ. sigma T (K)": f"{np.nanmedian(sigma_T_local(_T)):.3f}",
-        })
-    error_table = pd.DataFrame(_rows)
-    return (error_table,)
-
-
-@app.cell
-def _show_error_table(error_table):
-    error_table
-    return
-
-
-@app.cell
-def _md_fit_diagnostics(mo):
-    mo.md(r"""
-    ## Spline Fit Diagnostics
-
-    These check that the spline tracks the measured curve. The RMS residual
-    should sit near the $0.04\,\mathrm{m}\Omega$ target; the blocked-holdout RMS
-    and rolling-mean residual flag any local systematic miss.
-    """)
-    return
 
 
 @app.cell
@@ -441,7 +461,7 @@ def _spline_diagnostics(SPLINE_TARGET_MOHM, fit_spline, measurements, np, pd):
         return float(np.sqrt(np.mean(errors**2))) if len(errors) else float("nan")
 
     rows = []
-    for _measurement_id, _df in measurements.items():
+    for _, _df in measurements.items():
         meta = _df.iloc[0]
         T = _df["temperature_K"].to_numpy(dtype=float)
         R = _df["resistance_ohm"].to_numpy(dtype=float)
@@ -461,17 +481,14 @@ def _spline_diagnostics(SPLINE_TARGET_MOHM, fit_spline, measurements, np, pd):
 
 
 @app.cell
-def _show_spline_diagnostics(spline_diagnostics):
-    spline_diagnostics
-    return
-
-
-@app.cell
 def _trace_helpers(sigma_R, sigma_T_local):
     def trace(df):
         T = df["temperature_K"].to_numpy(dtype=float)
         R = df["resistance_ohm"].to_numpy(dtype=float)
-        R_err = sigma_R(df["voltage_V"].to_numpy(dtype=float), df["current_A"].to_numpy(dtype=float))
+        R_err = sigma_R(
+            df["voltage_V"].to_numpy(dtype=float),
+            df["current_A"].to_numpy(dtype=float),
+        )
         T_err = sigma_T_local(T)
         return dict(T=T, R=R, R_err=R_err, T_err=T_err)
 
@@ -484,16 +501,22 @@ def _pair_keys(tc_summary):
     heat_cool_groups, magnet_groups = {}, {}
     _paired = set()
     _no_mag = tc_summary[tc_summary["field_condition"] == "no_magnet"]
-    for (_I, _R), _g in _no_mag.groupby(["sample_current_mA_nominal", "series_resistor"]):
-        if set(_g["direction"]) >= {"heat", "cool"}:
-            heat_cool_groups[(float(_I), _R)] = _g["measurement_id"].tolist()
-            _paired.update(_g["measurement_id"])
-    for (_I, _R, _d), _g in tc_summary.groupby(
+    for (_current_mA, _series_resistor), _group in _no_mag.groupby(
+        ["sample_current_mA_nominal", "series_resistor"]
+    ):
+        if set(_group["direction"]) >= {"heat", "cool"}:
+            heat_cool_groups[(float(_current_mA), _series_resistor)] = (
+                _group["measurement_id"].tolist()
+            )
+            _paired.update(_group["measurement_id"])
+    for (_current_mA, _series_resistor, _direction), _group in tc_summary.groupby(
         ["sample_current_mA_nominal", "series_resistor", "direction"]
     ):
-        if set(_g["field_condition"]) >= {"magnet", "no_magnet"}:
-            magnet_groups[(float(_I), _R, _d)] = _g["measurement_id"].tolist()
-            _paired.update(_g["measurement_id"])
+        if set(_group["field_condition"]) >= {"magnet", "no_magnet"}:
+            magnet_groups[(float(_current_mA), _series_resistor, _direction)] = (
+                _group["measurement_id"].tolist()
+            )
+            _paired.update(_group["measurement_id"])
     solo_ids = [m for m in tc_summary["measurement_id"] if m not in _paired]
     return heat_cool_groups, magnet_groups, solo_ids
 
@@ -522,7 +545,7 @@ def _fmt():
 
 
 @app.cell
-def _two_panel(T_MAX, T_MIN, plt):
+def _two_panel(T_MAX, T_MIN, np, plt):
     def build(_title=None):
         fig, (ax_r, ax_d) = plt.subplots(
             2, 1, figsize=(7.2, 5.6), sharex=True,
@@ -550,6 +573,23 @@ def _two_panel(T_MAX, T_MIN, plt):
 
     def draw(ax_r, ax_d, tr, sp, color, marker, label):
         tc = sp["tc"]
+        tleft = sp.get("transition_Tleft")
+        tright = sp.get("transition_Tright")
+        if (
+            tleft is not None
+            and tright is not None
+            and np.isfinite(tleft)
+            and np.isfinite(tright)
+        ):
+            for ax in (ax_r, ax_d):
+                ax.axvspan(
+                    min(tleft, tright),
+                    max(tleft, tright),
+                    color=color,
+                    alpha=0.08,
+                    lw=0,
+                    zorder=0,
+                )
         ax_r.errorbar(
             tr["T"], tr["R"] * 1e3,
             xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
@@ -625,7 +665,7 @@ def _dir_styles():
 
 
 @app.cell
-def _md_plot_guide(mo, tc_summary):
+def _md_plot_guide(TRANSITION_DERIVATIVE_FRACTION, mo, tc_summary):
     def _one(current_mA, direction, field):
         _row = tc_summary[
             (tc_summary["sample_current_mA_nominal"] == current_mA)
@@ -646,7 +686,11 @@ def _md_plot_guide(mo, tc_summary):
     mo.md(rf"""
     ## Main Comparisons
 
-    Dashed lines mark $T_c = \arg\max_T R'(T)$; the lower panel shows $R'(T)$.
+    In each figure, the upper panel is the measured $R(T)$ curve with its spline
+    fit, and the lower panel is the spline derivative. Dashed lines mark $T_c$.
+    The shaded bands show the symmetric
+    ${TRANSITION_DERIVATIVE_FRACTION:g}R'(T_c)$ derivative width used for
+    $\sigma_\mathrm{{transition}}$.
 
     - **Thermal hysteresis:** at $30\,\mathrm{{mA}}$, heating is
       ${_lag_30:.2f}\,\mathrm{{K}}$ above cooling.
@@ -670,10 +714,12 @@ def _heat_cool_plots(
     mo,
 ):
     _figs = []
-    for (_I, _R), _ids in sorted(heat_cool_groups.items()):
-        _members = [(m, measurements[m]) for m in _ids]
-        _range = intersection([measurements[m] for m in _ids])
-        _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  $B = 0$"
+    for (_current_mA, _series_resistor), _measurement_ids in sorted(
+        heat_cool_groups.items()
+    ):
+        _members = [(m, measurements[m]) for m in _measurement_ids]
+        _range = intersection([measurements[m] for m in _measurement_ids])
+        _info = rf"${fmt_I(_current_mA)}$,  ${fmt_R(_series_resistor)}$,  $B = 0$"
         _figs.append(make_figure(
             _members, DIR_STYLES, lambda meta: meta["direction"], _info,
             "Heating and cooling comparison",
@@ -696,10 +742,15 @@ def _magnet_plots(
     mo,
 ):
     _figs = []
-    for (_I, _R, _d), _ids in sorted(magnet_groups.items()):
-        _members = [(m, measurements[m]) for m in _ids]
-        _range = intersection([measurements[m] for m in _ids])
-        _info = rf"${fmt_I(_I)}$,  ${fmt_R(_R)}$,  {fmt_dir(_d)}"
+    for (_current_mA, _series_resistor, _direction), _measurement_ids in sorted(
+        magnet_groups.items()
+    ):
+        _members = [(m, measurements[m]) for m in _measurement_ids]
+        _range = intersection([measurements[m] for m in _measurement_ids])
+        _info = (
+            rf"${fmt_I(_current_mA)}$,  ${fmt_R(_series_resistor)}$,  "
+            rf"{fmt_dir(_direction)}"
+        )
         _figs.append(make_figure(
             _members, FIELD_STYLES, lambda meta: meta["field_condition"], _info,
             "Applied-field comparison",
@@ -740,36 +791,56 @@ def _solo_plots(
 
 
 @app.cell
-def _md_final(mo):
-    mo.md(r"""
+def _reported_tc(np, tc_summary):
+    _anchor = tc_summary[
+        np.isclose(tc_summary["sample_current_mA_nominal"], 30.0)
+        & (tc_summary["field_condition"] == "no_magnet")
+    ]
+    if set(_anchor["direction"]) >= {"heat", "cool"}:
+        reported_tc = dict(
+            tc_K=float(_anchor["tc_K"].mean()),
+            err_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
+        )
+    else:
+        reported_tc = None
+    return (reported_tc,)
+
+
+@app.cell
+def _md_final(mo, reported_tc):
+    _reported = (
+        rf"The low-current, zero-field pair gives "
+        rf"$T_c = {reported_tc['tc_K']:.2f}\pm{reported_tc['err_K']:.2f}\,\mathrm{{K}}$."
+        if reported_tc is not None
+        else "The table below reports each run individually."
+    )
+    mo.md(rf"""
     ## Results
 
-    Each $T_c = \arg\max_T R'(T)$ is reported with the combined uncertainty
-    $\sigma_{T_c}$. The figure orders the runs by $T_c$. Tables and figure are
-    written to `results/part_a/`.
+    {_reported} The table keeps the readable per-run result in the notebook. The
+    exported CSVs in `results/part_a/` include the full uncertainty components
+    and spline diagnostics.
     """)
     return
 
 
 @app.cell
 def _final_table(pd, tc_summary):
-    def _fmt(val, err):
-        rel = (err / abs(val) * 100.0) if val else float("nan")
-        return f"{val:.2f} +/- {err:.2f} ({rel:.2f}%)"
+    def _condition(row):
+        field = "B=0" if row["field_condition"] == "no_magnet" else "B!=0"
+        return (
+            f"{int(row['sample_current_mA_nominal'])} mA, "
+            f"{row['series_resistor']}, {row['direction']}, {field}"
+        )
 
     _rows = []
-    for _, _r in tc_summary.iterrows():
+    for _, _r in tc_summary.sort_values("tc_K").iterrows():
         _rows.append({
-            "I (mA)": int(_r["sample_current_mA_nominal"]),
-            "R_s": _r["series_resistor"],
-            "sweep": _r["direction"],
-            "field": _r["field_condition"],
-            "Tc [K]": _fmt(_r["tc_K"], _r["tc_err_K"]),
-            "sigma samp [K]": f"{_r['tc_sampling_err_K']:.3f}",
-            "sigma smooth [K]": f"{_r['tc_smoothing_err_K']:.3f}",
-            "target [mOhm]": f"{_r['spline_target_mohm']:.2f}",
-            "sweep [mOhm]": _r["spline_sensitivity_targets_mohm"],
-            "RMS resid [mOhm]": f"{_r['spline_rmse_mohm']:.3f}",
+            "condition": _condition(_r),
+            "Tc +/- sigma [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_err_K']:.2f}",
+            "sigma samp [K]": f"{_r['tc_sampling_err_K']:.2f}",
+            "sigma width [K]": f"{_r['tc_transition_err_K']:.2f}",
+            "fit RMS [mOhm]": f"{_r['spline_rmse_mohm']:.3f}",
         })
     final_table = pd.DataFrame(_rows)
     return (final_table,)
@@ -791,6 +862,7 @@ def _summary_plot(
     fmt_field,
     np,
     plt,
+    reported_tc,
     tc_summary,
 ):
     """Forest-style overview of the reported Tc per run, ordered by value.
@@ -803,14 +875,12 @@ def _summary_plot(
         np.isclose(_df["sample_current_mA_nominal"], 30.0)
         & (_df["field_condition"] == "no_magnet")
     )
-    _anchor_rows = _df[_anchor_mask]
 
     fig, ax = plt.subplots(figsize=(7.0, 3.9))
-    _band_handle = None
-    if set(_anchor_rows["direction"]) >= {"heat", "cool"}:
-        _final_tc = float(_anchor_rows["tc_K"].mean())
-        _final_err = float((_anchor_rows["tc_K"].max() - _anchor_rows["tc_K"].min()) / 2.0)
-        _band_handle = ax.axvspan(
+    if reported_tc is not None:
+        _final_tc = reported_tc["tc_K"]
+        _final_err = reported_tc["err_K"]
+        ax.axvspan(
             _final_tc - _final_err,
             _final_tc + _final_err,
             color="#f2b134",
@@ -826,14 +896,11 @@ def _summary_plot(
             alpha=0.85,
             zorder=1,
         )
-        ax.text(
-            _final_tc,
-            len(_df) - 0.08,
-            rf"final band: ${_final_tc:.2f}\pm{_final_err:.2f}$ K",
-            ha="center",
-            va="top",
-            fontsize=7.8,
+        ax.set_title(
+            rf"low-current estimate: ${_final_tc:.2f}\pm{_final_err:.2f}$ K",
+            fontsize=10,
             color="#6f4e00",
+            pad=8,
         )
 
     for _i, _r in _df.iterrows():
@@ -890,12 +957,11 @@ def _summary_plot(
     ]
     ax.legend(handles=_legend, loc="lower right", frameon=False,
               fontsize=8.5, handletextpad=0.4, labelspacing=0.3)
-    fig.subplots_adjust(left=0.36, right=0.97, bottom=0.13, top=0.96)
+    fig.subplots_adjust(left=0.36, right=0.97, bottom=0.13, top=0.90)
 
     summary_fig = fig
     summary_plot_path = OUT_DIR / "tc_summary.png"
     fig.savefig(summary_plot_path)
-    print(f"wrote {summary_plot_path}")
     return (summary_fig,)
 
 
@@ -905,8 +971,6 @@ def _write(OUT_DIR, spline_diagnostics, tc_summary):
     diagnostics_path = OUT_DIR / "spline_diagnostics.csv"
     tc_summary.to_csv(tc_path, index=False)
     spline_diagnostics.to_csv(diagnostics_path, index=False)
-    print(f"wrote {tc_path}")
-    print(f"wrote {diagnostics_path}")
     return
 
 
