@@ -797,10 +797,20 @@ def _reported_tc(np, tc_summary):
         & (tc_summary["field_condition"] == "no_magnet")
     ]
     if set(_anchor["direction"]) >= {"heat", "cool"}:
-        reported_tc = dict(
-            tc_K=float(_anchor["tc_K"].mean()),
-            err_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
-        )
+        _sigma = _anchor["tc_err_K"].to_numpy(dtype=float)
+        _value = _anchor["tc_K"].to_numpy(dtype=float)
+        _valid = np.isfinite(_sigma) & (_sigma > 0) & np.isfinite(_value)
+        if np.any(_valid):
+            _weights = 1.0 / _sigma[_valid] ** 2
+            reported_tc = dict(
+                tc_K=float(np.average(_value[_valid], weights=_weights)),
+                err_K=float(np.sqrt(1.0 / np.sum(_weights))),
+            )
+        else:
+            reported_tc = dict(
+                tc_K=float(_anchor["tc_K"].mean()),
+                err_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
+            )
     else:
         reported_tc = None
     return (reported_tc,)
@@ -848,7 +858,7 @@ def _final_table(pd, tc_summary):
 
 @app.cell
 def _show_final(final_table):
-    final_table
+    final_table  # type: ignore
     return
 
 
@@ -976,7 +986,7 @@ def _write(OUT_DIR, spline_diagnostics, tc_summary):
 
 @app.cell
 def _show_summary_plot(summary_fig):
-    summary_fig
+    summary_fig  # type: ignore
     return
 
 
