@@ -79,7 +79,7 @@ def _paths(Path):
 
 @app.cell
 def _constants():
-    SPLINE_DEGREE = 3
+    SPLINE_DEGREE = 5
     SPLINE_TARGET_MOHM = 0.04
     SPLINE_GRID_POINTS = 2000
     SPLINE_BRACKET_STEPS = 12
@@ -181,16 +181,15 @@ def _md_tc_methods(SPLINE_TARGET_MOHM, mo):
     mo.md(rf"""
     ## Method
 
-    For each run, fit a cubic smoothing spline $\hat R(T)$. This is not an
-    interpolating cubic spline: it is still piecewise cubic, but it is allowed to
-    miss individual noisy points. The smoothing parameter is chosen so the RMS
-    residual is about ${SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$; in the code,
-    this means
+    For each run, fit a quintic smoothing spline $\hat R(T)$. This is not an
+    interpolating spline: it is allowed to miss individual noisy points. The
+    smoothing parameter is chosen so the RMS residual is about
+    ${SPLINE_TARGET_MOHM:g}\,\mathrm{{m}}\Omega$; in the code, this means
     $s=N({SPLINE_TARGET_MOHM:g}\times10^{{-3}}\,\Omega)^2$.
 
-    After fitting, SciPy constructs the derivative spline analytically from the
-    fitted piecewise polynomials. The dense grid is used only to bracket the
-    maximum before bounded optimization:
+    After fitting, SciPy constructs the first derivative spline analytically
+    from the fitted piecewise polynomials. The dense grid is used only to
+    bracket the maximum before bounded optimization:
 
     $$T_c = \arg\max_T \hat R'(T).$$
 
@@ -217,7 +216,15 @@ def _md_tc_methods(SPLINE_TARGET_MOHM, mo):
     $$\Delta T =
     \max\left(T_c-T_L,\;T_R-T_c\right).$$
 
-    We report $T_c\pm\Delta T$.
+    We do not treat all temperatures inside this interval as equally likely.
+    Instead, $T_c$ is the peak of a Gaussian likelihood, and the curvature
+    interval sets its scale. Treating $T_c\pm\Delta T$ as an approximate
+    two-sigma plausible range gives the reported standard uncertainty
+
+    $$\sigma_{{T_c}}=\frac{{\Delta T}}{{2}}.$$
+
+    We report $T_c\pm\sigma_{{T_c}}$. The plots still shade the wider
+    $T_c\pm\Delta T$ interval to show how the scale was chosen.
     """)
     return
 
@@ -240,7 +247,7 @@ def _spline_model_helpers(
         order = np.argsort(T)
         T, R = T[order], R[order]
         if len(T) < SPLINE_DEGREE + 1:
-            raise ValueError("not enough points for a cubic smoothing spline")
+            raise ValueError("not enough points for a quintic smoothing spline")
         return T, R
 
     def fit_spline(T, R, target_mohm=None):
@@ -248,8 +255,16 @@ def _spline_model_helpers(
         target_mohm = SPLINE_TARGET_MOHM if target_mohm is None else float(target_mohm)
         s = len(T) * (target_mohm * 1e-3) ** 2
         spline = UnivariateSpline(T, R, k=SPLINE_DEGREE, s=s)
-        rmse_mohm = float(np.sqrt(np.mean((R - spline(T)) ** 2))) * 1e3
-        return dict(T=T, R=R, spline=spline, rmse_mohm=rmse_mohm)
+        residual = R - spline(T)
+        rmse_mohm = float(np.sqrt(np.mean(residual**2))) * 1e3
+        return dict(
+            T=T,
+            R=R,
+            spline=spline,
+            rmse_mohm=rmse_mohm,
+            target_mohm=target_mohm,
+            smoothing_s=s,
+        )
 
     def derivative_peak(spline, T_min, T_max):
         d_spline = spline.derivative()
@@ -285,6 +300,7 @@ def _spline_model_helpers(
 
 @app.cell
 def _analysis(
+    SPLINE_DEGREE,
     SPLINE_TARGET_MOHM,
     derivative_peak,
     fit_spline,
@@ -392,6 +408,7 @@ def _analysis(
         interval_delta, interval_width, interval_detail = (
             _transition_interval(tc, T_grid, dR_grid)
         )
+        tc_sigma = float(interval_delta / 2.0)
         sigma_sampling = sigma_T_at(fit["T"], tc)
 
         overlay = dict(
@@ -410,7 +427,7 @@ def _analysis(
             direction=meta["direction"],
             field_condition=meta["field_condition"],
             tc_K=tc,
-            tc_delta_K=interval_delta,
+            tc_sigma_K=tc_sigma,
             tc_sampling_sigma_K=sigma_sampling,
             tc_interval_delta_K=interval_detail["delta_K"],
             tc_interval_width_K=interval_width,
@@ -425,8 +442,10 @@ def _analysis(
             tc_derivative_curvature_at_center=interval_detail[
                 "curvature_at_center"
             ],
+            spline_degree=SPLINE_DEGREE,
             spline_target_mohm=SPLINE_TARGET_MOHM,
             spline_rmse_mohm=fit["rmse_mohm"],
+            spline_s=fit["smoothing_s"],
         )
         return record, overlay
 
@@ -446,7 +465,14 @@ def _analysis(
 
 
 @app.cell
-def _spline_diagnostics(SPLINE_TARGET_MOHM, fit_spline, measurements, np, pd):
+def _spline_diagnostics(
+    SPLINE_DEGREE,
+    SPLINE_TARGET_MOHM,
+    fit_spline,
+    measurements,
+    np,
+    pd,
+):
     def _residual_stats(T, R, target_mohm):
         fit = fit_spline(T, R, target_mohm=target_mohm)
         residual = (fit["R"] - fit["spline"](fit["T"])) * 1e3
@@ -488,6 +514,7 @@ def _spline_diagnostics(SPLINE_TARGET_MOHM, fit_spline, measurements, np, pd):
             "I (mA)": int(meta["sample_current_mA_nominal"]),
             "sweep": meta["direction"],
             "field": meta["field_condition"],
+            "spline k": str(SPLINE_DEGREE),
             "target (mOhm)": f"{SPLINE_TARGET_MOHM:.2f}",
             "RMS resid (mOhm)": f"{stats['rms_mohm']:.3f}",
             "holdout RMS (mOhm)": f"{_blocked_holdout_rms(T, R, SPLINE_TARGET_MOHM):.3f}",
@@ -563,33 +590,35 @@ def _fmt():
 
 
 @app.cell
-def _two_panel(T_MAX, T_MIN, np, plt):
+def _transition_plot_helpers(T_MAX, T_MIN, np, plt):
     def build(_title=None):
-        fig, (ax_r, ax_d) = plt.subplots(
-            2, 1, figsize=(7.2, 5.6), sharex=True,
-            gridspec_kw={"height_ratios": [2.4, 1.0], "hspace": 0.07},
+        fig, (ax_r, ax_res, ax_d) = plt.subplots(
+            3, 1, figsize=(7.2, 5.9), sharex=True,
+            gridspec_kw={"height_ratios": [2.35, 0.85, 1.0], "hspace": 0.08},
         )
         if _title:
             fig.suptitle(_title, x=0.5, y=0.97, fontsize=13, fontweight="medium")
         ax_r.set_ylabel(r"$R\;\;(\mathrm{m}\Omega)$")
-        ax_d.set_xlabel(r"$T\;\;(\mathrm{K})$")
+        ax_res.set_ylabel(r"$R-\hat R\;\;(\mathrm{m}\Omega)$")
         ax_d.set_ylabel(r"$R'\;\;(\mathrm{m}\Omega/\mathrm{K})$")
-        for ax in (ax_r, ax_d):
+        ax_d.set_xlabel(r"$T\;\;(\mathrm{K})$")
+        ax_res.axhline(0.0, color="#666666", lw=0.7, alpha=0.5, zorder=0)
+        for ax in (ax_r, ax_res, ax_d):
             ax.grid(True, axis="y", alpha=0.1, lw=0.5)
             ax.tick_params(direction="in", length=3, top=False, right=False)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-        ax_d.set_xlim(T_MIN - 1, T_MAX + 1)
-        return fig, ax_r, ax_d
+            ax.set_xlim(T_MIN - 1, T_MAX + 1)
+        return fig, ax_r, ax_res, ax_d
 
     def legend_with_info(ax, info):
         ax.legend(
-            loc="upper left", frameon=False, fontsize=8.5,
+            loc="upper left", frameon=False, fontsize=8.2,
             title=f"${info}$" if not info.startswith("$") else info,
-            title_fontsize=9, alignment="left", handlelength=1.6,
+            title_fontsize=8.8, alignment="left", handlelength=1.6,
         )
 
-    def draw(ax_r, ax_d, tr, sp, color, marker, label):
+    def draw(ax_r, ax_res, ax_d, tr, sp, color, marker, label):
         tc = sp["tc"]
         tleft = sp.get("transition_Tleft")
         tright = sp.get("transition_Tright")
@@ -599,30 +628,44 @@ def _two_panel(T_MAX, T_MIN, np, plt):
             and np.isfinite(tleft)
             and np.isfinite(tright)
         ):
-            for ax in (ax_r, ax_d):
-                ax.axvspan(
-                    min(tleft, tright),
-                    max(tleft, tright),
-                    color=color,
-                    alpha=0.08,
-                    lw=0,
-                    zorder=0,
-                )
-        ax_r.errorbar(
+            ax_d.axvspan(
+                min(tleft, tright),
+                max(tleft, tright),
+                color=color,
+                alpha=0.075,
+                lw=0,
+                zorder=0,
+            )
+        ax_r.plot(
             tr["T"], tr["R"] * 1e3,
-            xerr=tr["T_err"], yerr=tr["R_err"] * 1e3,
-            fmt=marker, ms=3.6, mfc="none", mec=color, mew=0.7,
-            ecolor=color, elinewidth=0.5, capsize=0,
-            alpha=0.6, zorder=2,
+            marker=marker, ls="none", ms=3.2, mfc="white", mec=color, mew=0.65,
+            alpha=0.48, zorder=2,
         )
         ax_r.plot(
             sp["T"], sp["R"] * 1e3, lw=1.6, color=color, zorder=3,
             label=rf"{label},  $T_c = {tc:.2f}\,$K",
         )
-        ax_r.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.45, zorder=1)
+        ax_r.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.25, zorder=1)
+
+        residual_mohm = (tr["R"] - np.interp(tr["T"], sp["T"], sp["R"])) * 1e3
+        ax_res.plot(
+            tr["T"], residual_mohm,
+            marker=marker, ls="none", ms=2.8, mfc="white", mec=color, mew=0.6,
+            alpha=0.56, zorder=2,
+        )
+        if np.any(np.isfinite(residual_mohm)):
+            _old_lo, _old_hi = ax_res.get_ylim()
+            _max_abs = max(
+                float(np.nanmax(np.abs(residual_mohm))),
+                abs(float(_old_lo)),
+                abs(float(_old_hi)),
+            )
+            _limit = max(0.08, 1.15 * _max_abs)
+            ax_res.set_ylim(-_limit, _limit)
+        ax_res.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.25, zorder=1)
 
         ax_d.plot(sp["T"], sp["dR_dT"] * 1e3, color=color, lw=1.4, alpha=0.85)
-        ax_d.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.45, zorder=1)
+        ax_d.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.55, zorder=1)
 
     return build, draw, legend_with_info
 
@@ -646,12 +689,13 @@ def _pair_clip():
 @app.cell
 def _make_figure(build, clip, draw, legend_with_info, spline_overlays, trace):
     def make_figure(members, styles, key_of, info, title, clip_range=None):
-        fig, ax_r, ax_d = build(title)
+        fig, ax_r, ax_res, ax_d = build(title)
         for _mid, _df in members:
             _d = clip(_df, *clip_range) if clip_range else _df
             _color, _marker, _label = styles[key_of(_d.iloc[0])]
             draw(
                 ax_r,
+                ax_res,
                 ax_d,
                 trace(_d),
                 spline_overlays[_mid],
@@ -660,10 +704,10 @@ def _make_figure(build, clip, draw, legend_with_info, spline_overlays, trace):
                 _label,
             )
         if clip_range:
-            for _ax in (ax_r, ax_d):
+            for _ax in (ax_r, ax_res, ax_d):
                 _ax.set_xlim(clip_range[0] - 0.5, clip_range[1] + 0.5)
         legend_with_info(ax_r, info)
-        fig.subplots_adjust(left=0.11, right=0.97, bottom=0.10, top=0.89)
+        fig.subplots_adjust(left=0.12, right=0.97, bottom=0.10, top=0.89)
         return fig
 
     return (make_figure,)
@@ -705,10 +749,11 @@ def _md_plot_guide(mo, tc_summary):
     ## Main Comparisons
 
     In each figure, the upper panel is the measured $R(T)$ curve with its spline
-    fit, and the lower panel is the spline derivative. Dashed lines mark $T_c$.
-    The shaded bands show the central concave-down interval of the derivative
-    peak used for the symmetric $T_c\pm\Delta T$ interval. All comparisons
-    below are comparisons of this
+    fit, the middle panel is the residual $R-\hat R$, and the lower panel is the
+    spline derivative. Dashed colored lines mark $T_c$. The shaded bands in the
+    derivative panel show the wider $T_c\pm\Delta T$ scale-setting interval; the
+    quoted uncertainty is the Gaussian standard uncertainty
+    $\sigma_{{T_c}}=\Delta T/2$. All comparisons below are comparisons of this
     operational resistive $T_c$ under different sweep, current, and field
     conditions.
 
@@ -817,19 +862,19 @@ def _reported_tc(np, tc_summary):
         & (tc_summary["field_condition"] == "no_magnet")
     ]
     if set(_anchor["direction"]) >= {"heat", "cool"}:
-        _half_width = _anchor["tc_delta_K"].to_numpy(dtype=float)
+        _sigma = _anchor["tc_sigma_K"].to_numpy(dtype=float)
         _value = _anchor["tc_K"].to_numpy(dtype=float)
-        _valid = np.isfinite(_half_width) & (_half_width > 0) & np.isfinite(_value)
+        _valid = np.isfinite(_sigma) & (_sigma > 0) & np.isfinite(_value)
         if np.any(_valid):
-            _weights = 1.0 / _half_width[_valid] ** 2
+            _weights = 1.0 / _sigma[_valid] ** 2
             reported_tc = dict(
                 tc_K=float(np.average(_value[_valid], weights=_weights)),
-                delta_K=float(np.sqrt(1.0 / np.sum(_weights))),
+                sigma_K=float(np.sqrt(1.0 / np.sum(_weights))),
             )
         else:
             reported_tc = dict(
                 tc_K=float(_anchor["tc_K"].mean()),
-                delta_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
+                sigma_K=float((_anchor["tc_K"].max() - _anchor["tc_K"].min()) / 2.0),
             )
     else:
         reported_tc = None
@@ -839,8 +884,8 @@ def _reported_tc(np, tc_summary):
 @app.cell
 def _md_final(mo, reported_tc):
     _reported = (
-        rf"The $1/\Delta T^2$ weighted low-current, zero-field pair gives "
-        rf"$T_c = {reported_tc['tc_K']:.2f}\pm{reported_tc['delta_K']:.2f}\,\mathrm{{K}}$."
+        rf"The $1/\sigma_{{T_c}}^2$ weighted low-current, zero-field pair gives "
+        rf"$T_c = {reported_tc['tc_K']:.2f}\pm{reported_tc['sigma_K']:.2f}\,\mathrm{{K}}$."
         if reported_tc is not None
         else "The table below reports each run individually."
     )
@@ -867,8 +912,8 @@ def _final_table(pd, tc_summary):
     for _, _r in tc_summary.sort_values("tc_K").iterrows():
         _rows.append({
             "condition": _condition(_r),
-            "Tc +/- Delta [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_delta_K']:.2f}",
-            "symmetric interval [K]": (
+            "Tc +/- sigma [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_sigma_K']:.2f}",
+            "two-sigma interval [K]": (
                 f"{_r['tc_interval_left_K']:.2f}"
                 f" - {_r['tc_interval_right_K']:.2f}"
             ),
@@ -877,7 +922,8 @@ def _final_table(pd, tc_summary):
                 f" - {_r['tc_derivative_curvature_right_K']:.2f}"
             ),
             "sampling sigma [K]": f"{_r['tc_sampling_sigma_K']:.2f}",
-            "Delta [K]": f"{_r['tc_interval_delta_K']:.2f}",
+            "transition Delta [K]": f"{_r['tc_interval_delta_K']:.2f}",
+            "sigma [K]": f"{_r['tc_sigma_K']:.2f}",
             "fit RMS [mOhm]": f"{_r['spline_rmse_mohm']:.3f}",
         })
     final_table = pd.DataFrame(_rows)
@@ -917,10 +963,10 @@ def _summary_plot(
     fig, ax = plt.subplots(figsize=(7.0, 3.9))
     if reported_tc is not None:
         _final_tc = reported_tc["tc_K"]
-        _final_delta = reported_tc["delta_K"]
+        _final_sigma = reported_tc["sigma_K"]
         ax.axvspan(
-            _final_tc - _final_delta,
-            _final_tc + _final_delta,
+            _final_tc - _final_sigma,
+            _final_tc + _final_sigma,
             color="#f2b134",
             alpha=0.18,
             lw=0,
@@ -935,7 +981,7 @@ def _summary_plot(
             zorder=1,
         )
         ax.set_title(
-            rf"weighted low-current estimate: ${_final_tc:.2f}\pm{_final_delta:.2f}$ K",
+            rf"weighted low-current estimate: ${_final_tc:.2f}\pm{_final_sigma:.2f}$ K",
             fontsize=10,
             color="#6f4e00",
             pad=8,
@@ -945,7 +991,7 @@ def _summary_plot(
         _color, _marker, _ = DIR_STYLES[_r["direction"]]
         _is_anchor = bool(_anchor_mask.iloc[_i])
         ax.errorbar(
-            _r["tc_K"], _i, xerr=_r["tc_delta_K"],
+            _r["tc_K"], _i, xerr=_r["tc_sigma_K"],
             fmt=_marker, ms=7.2 if _is_anchor else 5.6,
             color=_color, alpha=1.0 if _is_anchor else 0.78,
             mfc=_color, mec="#222222" if _is_anchor else _color,
@@ -954,7 +1000,7 @@ def _summary_plot(
             capsize=0, zorder=5 if _is_anchor else 3,
         )
         ax.text(
-            _r["tc_K"] + _r["tc_delta_K"] + 0.18, _i,
+            _r["tc_K"] + _r["tc_sigma_K"] + 0.18, _i,
             rf"${_r['tc_K']:.2f}$", va="center", ha="left",
             fontsize=8.2 if _is_anchor else 8,
             fontweight="bold" if _is_anchor else "regular",
@@ -973,9 +1019,9 @@ def _summary_plot(
             _tick.set_fontweight("bold")
             _tick.set_color("#222222")
     ax.set_ylim(-0.6, len(_df) - 0.4)
-    ax.set_xlabel(r"$T_c\;\;(\mathrm{K})$")
-    _lo = float((_df["tc_K"] - _df["tc_delta_K"]).min())
-    _hi = float((_df["tc_K"] + _df["tc_delta_K"]).max())
+    ax.set_xlabel(r"$T_c\;\;(\mathrm{K})$, error bars show $\sigma_{T_c}$")
+    _lo = float((_df["tc_K"] - _df["tc_sigma_K"]).min())
+    _hi = float((_df["tc_K"] + _df["tc_sigma_K"]).max())
     ax.set_xlim(_lo - 0.6, _hi + 1.6)
     ax.grid(True, axis="x", alpha=0.1, lw=0.5)
     ax.tick_params(axis="x", direction="in", length=3, top=False)
@@ -985,7 +1031,7 @@ def _summary_plot(
 
     _legend = [
         Line2D([0], [0], color="#f2b134", lw=7, alpha=0.45,
-               label="final estimate band"),
+               label=r"final $1\sigma$ band"),
         Line2D([0], [0], marker="o", ls="none", color="#222222",
                mfc="white", mec="#222222", label="low-current pair"),
         Line2D([0], [0], marker=DIR_STYLES["heat"][1], ls="none",
