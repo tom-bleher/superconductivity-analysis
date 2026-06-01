@@ -23,10 +23,11 @@ def _md_intro(mo):
     We study the phase transition of a
     $\mathrm{Bi_2Sr_2Ca_2Cu_3O_{10+x}}$ superconductor of type II.
 
-    We measure $I,V,T$ and via Ohm's law translate to a $R(T)$ scatter.
-    We perform a Savitzky-Golay local-polynomial filter to get a smooth $R(T)$ curve
-    composed of polynomials of order 3. We then differentiate the smoothed curve to get $R'(T)$ and define the critical temperature as
-    $$T_c = \arg\max_T R'(T).$$
+    We measure $I,V,T$ and use Ohm's law to obtain the four-probe
+    resistance curve $R(T)$. We smooth $R(T)$ with a Savitzky-Golay
+    local-polynomial filter of order 3, then define the operational resistive
+    transition temperature by the maximum slope:
+    $$T_c^{\mathrm{slope}} = \arg\max_T \frac{dR}{dT}.$$
 
     ### Uncertainties
 
@@ -39,17 +40,19 @@ def _md_intro(mo):
     \frac{T_{{i+1}}-T_{{i-1}}}{2\sqrt{{12}}}.
     \]
 
-    Additionally, to compensate for the fact that the exact $T_c$ point
-    is difficult to assign precisely we assume that the true $T_c$ is somewhere near the peak of the derivative.
-    We define the width of the $R'(T)$ peaking as a plausible range to find the true critical temperature.
+    Additionally, to compensate for the fact that the exact transition point
+    is difficult to assign precisely we assume that the transition temperature
+    lies near the peak of the derivative.
+    We define the width of the $R'(T)$ peak as a plausible range for the
+    transition temperature.
     We differentiate once more to get $R''(T)$ and define the range as
 
     \[
     \Delta T = \max\left(T_c-T_L,\;T_R-T_c\right).
     \]
 
-    Where $T_L$ and $T_R$ are the temperatures at the left and right zero crossings of $R''(T)$.
-    We then treat $T_c$ as the peak of a Gaussian likelihood and $\Delta T$ as an approximate two-sigma width, giving
+    where $T_L$ and $T_R$ are the temperatures at the left and right zero crossings of $R''(T)$.
+    We then treat $T_c^{\mathrm{slope}}$ as the peak of a Gaussian likelihood and $\Delta T$ as an approximate two-sigma width, giving
 
     \[
     \sigma_{{T_c}}=\frac{{\Delta T}}{{2}}.
@@ -542,7 +545,7 @@ def _transition_plot_helpers(T_MAX, T_MIN, np, plt):
         if _title:
             fig.suptitle(_title, x=0.5, y=0.97, fontsize=13, fontweight="medium")
         ax_r.set_ylabel(r"$R\;\;(\mathrm{m}\Omega)$")
-        ax_d.set_ylabel(r"$R'\;\;(\mathrm{m}\Omega/\mathrm{K})$")
+        ax_d.set_ylabel(r"$dR/dT\;\;(\mathrm{m}\Omega/\mathrm{K})$")
         ax_d.set_xlabel(r"$T\;\;(\mathrm{K})$")
         for ax in (ax_r, ax_d):
             ax.grid(True, axis="y", alpha=0.1, lw=0.5)
@@ -584,7 +587,7 @@ def _transition_plot_helpers(T_MAX, T_MIN, np, plt):
         )
         ax_r.plot(
             sp["T"], sp["R"] * 1e3, lw=1.6, color=color, zorder=3,
-            label=rf"{label},  $T_c = {tc:.2f}\,$K",
+            label=rf"{label},  $T_c^{{\mathrm{{slope}}}} = {tc:.2f}\,$K",
         )
         ax_r.axvline(tc, color=color, ls=(0, (5, 3)), lw=0.8, alpha=0.25, zorder=1)
 
@@ -643,8 +646,8 @@ def _dir_styles():
         "heat": ("#d62728", "o", "heating"),
     }
     FIELD_STYLES = {
-        "no_magnet": ("#2ca02c", "s", r"$B = 0$"),
-        "magnet":    ("#9467bd", "o", r"$B \neq 0$"),
+        "no_magnet": ("#2ca02c", "s", "no magnet"),
+        "magnet":    ("#9467bd", "o", "magnet present"),
     }
     return DIR_STYLES, FIELD_STYLES
 
@@ -698,7 +701,7 @@ def _heat_cool_plots(
         _info = rf"${fmt_I(_current_mA)}$,  ${fmt_R(_series_resistor)}$"
         _figs.append(make_figure(
             _members, DIR_STYLES, lambda meta: meta["direction"], _info,
-            "Heating and cooling comparison",
+            "Sweep-direction comparison",
             _range,
         ))
     mo.vstack(_figs) if _figs else None
@@ -729,7 +732,7 @@ def _magnet_plots(
         )
         _figs.append(make_figure(
             _members, FIELD_STYLES, lambda meta: meta["field_condition"], _info,
-            "Applied-field comparison",
+            "Magnet-present comparison",
             _range,
         ))
     mo.vstack(_figs) if _figs else None
@@ -758,7 +761,7 @@ def _solo_plots(
         _figs.append(make_figure(
             [(_mid, measurements[_mid])], DIR_STYLES,
             lambda meta: meta["direction"], _info,
-            "Single transition run",
+            "Single-condition transition",
             None,
         ))
     mo.vstack(_figs) if _figs else None
@@ -802,14 +805,17 @@ def _md_final(mo, reported_tc, reported_tc_by_direction):
         if _estimate is None:
             return "not available"
         return (
-            rf"$T_c = {_estimate['tc_K']:.2f}\pm{_estimate['sigma_K']:.2f}\,\mathrm{{K}}$"
+            rf"$T_c^{{\mathrm{{slope}}}} = {_estimate['tc_K']:.2f}"
+            rf"\pm{_estimate['sigma_K']:.2f}\,\mathrm{{K}}$"
         )
 
     _reported = (
         rf"The estimate is the $1/\sigma_{{T_c}}^2$ weighted mean of the "
         rf"{reported_tc['n_runs']} heating/cooling runs: "
-        rf"{_fmt_estimate(reported_tc)}. The applied-field run is retained in the table as a "
-        rf"comparison point but excluded from this estimate."
+        rf"{_fmt_estimate(reported_tc)}. This is a compact comparison across "
+        rf"zero-field runs, not a material constant; sweep direction and current "
+        rf"produce visible run-to-run scatter. The applied-field run is retained "
+        rf"in the table as a comparison point but excluded from this estimate."
         if reported_tc is not None
         else "The table below reports each run individually; no weighted estimate is available."
     )
@@ -819,7 +825,8 @@ def _md_final(mo, reported_tc, reported_tc_by_direction):
     ## Summary
 
     The table below summarizes the transition temperatures extracted from each run, ordered by value. 
-    The estimate is a weighted mean of the heating/cooling runs.
+    The estimate is a weighted mean of the heating/cooling runs and should be
+    interpreted alongside the run-to-run scatter.
 
     {_reported}
 
@@ -847,7 +854,7 @@ def _final_table(pd, tc_summary):
     for _, _r in tc_summary.sort_values("tc_K").iterrows():
         _rows.append({
             "condition": _condition(_r),
-            "Tc +/- sigma [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_sigma_K']:.2f}",
+            "Tc_slope +/- sigma [K]": f"{_r['tc_K']:.2f} +/- {_r['tc_sigma_K']:.2f}",
             "two-sigma interval [K]": (
                 f"{_r['tc_interval_left_K']:.2f}"
                 f" - {_r['tc_interval_right_K']:.2f}"
@@ -874,7 +881,7 @@ def _show_final(final_table):
 def _summary_plot_helper(DIR_STYLES, Line2D, OUT_DIR, fmt_I, fmt_R, plt):
     def make_tc_summary_plot(_df, _estimate, _title, _filename):
         _df = _df.sort_values("tc_K").reset_index(drop=True)
-        fig, ax = plt.subplots(figsize=(7.0, 3.9))
+        fig, ax = plt.subplots(figsize=(12.0, 5.6))
 
         if _estimate is not None:
             _final_tc = _estimate["tc_K"]
@@ -896,10 +903,11 @@ def _summary_plot_helper(DIR_STYLES, Line2D, OUT_DIR, fmt_I, fmt_R, plt):
                 zorder=1,
             )
             ax.set_title(
-                rf"{_title}: $T_c = {_final_tc:.2f}\pm{_estimate['sigma_K']:.2f}\,\mathrm{{K}}$",
-                fontsize=10,
+                rf"{_title}: weighted $T_c^{{\mathrm{{slope}}}} = "
+                rf"{_final_tc:.2f}\pm{_estimate['sigma_K']:.2f}\,\mathrm{{K}}$",
+                fontsize=13.0,
                 color="black",
-                pad=8,
+                pad=10,
             )
 
         for _i, _r in _df.iterrows():
@@ -907,29 +915,34 @@ def _summary_plot_helper(DIR_STYLES, Line2D, OUT_DIR, fmt_I, fmt_R, plt):
             _xerr = 2.0 * _r["tc_sigma_K"]
             ax.errorbar(
                 _r["tc_K"], _i, xerr=_xerr,
-                fmt=_marker, ms=5.8,
+                fmt=_marker, ms=7.0,
                 color=_color, alpha=0.82,
                 mfc=_color, mec=_color,
                 mew=1.0,
-                ecolor=_color, elinewidth=0.9,
+                ecolor=_color, elinewidth=1.15,
                 capsize=0, zorder=3,
             )
             ax.text(
                 _r["tc_K"] + _xerr + 0.18, _i,
                 rf"${_r['tc_K']:.2f}$", va="center", ha="left",
-                fontsize=8,
+                fontsize=10.0,
                 color="black",
             )
 
+        _direction_labels = {"heat": "heating", "cool": "cooling"}
         _labels = [
             rf"${fmt_I(_r['sample_current_mA_nominal'])}$,  "
-            rf"${fmt_R(_r['series_resistor'])}$"
+            rf"${fmt_R(_r['series_resistor'])}$,  "
+            rf"{_direction_labels.get(_r['direction'], _r['direction'])}"
             for _, _r in _df.iterrows()
         ]
         ax.set_yticks(range(len(_df)))
-        ax.set_yticklabels(_labels)
+        ax.set_yticklabels(_labels, fontsize=11.0)
         ax.set_ylim(-0.6, len(_df) - 0.4)
-        ax.set_xlabel(r"$T_c\;\;(\mathrm{K})$, error bars show $2\sigma_{T_c}$")
+        ax.set_xlabel(
+            r"$T_c^{\mathrm{slope}}\;\;(\mathrm{K})$; "
+            r"error bars show $2\sigma_{T_c}$"
+        )
         _lo = float((_df["tc_K"] - 2.0 * _df["tc_sigma_K"]).min())
         _hi = float((_df["tc_K"] + 2.0 * _df["tc_sigma_K"]).max())
         ax.set_xlim(_lo - 0.6, _hi + 1.6)
@@ -942,7 +955,7 @@ def _summary_plot_helper(DIR_STYLES, Line2D, OUT_DIR, fmt_I, fmt_R, plt):
         _directions = set(_df["direction"])
         _legend = [
             Line2D([0], [0], color="black", lw=7, alpha=0.22,
-                   label=r" $2\sigma$"),
+                   label=r"weighted mean $2\sigma$"),
         ]
         if "heat" in _directions:
             _legend.append(
@@ -955,18 +968,123 @@ def _summary_plot_helper(DIR_STYLES, Line2D, OUT_DIR, fmt_I, fmt_R, plt):
                        color=DIR_STYLES["cool"][0], label="cooling")
             )
         ax.legend(handles=_legend, loc="lower right", frameon=False,
-                  fontsize=8.5, handletextpad=0.4, labelspacing=0.3)
-        fig.subplots_adjust(left=0.36, right=0.97, bottom=0.13, top=0.90)
+                  fontsize=10.0, handletextpad=0.45, labelspacing=0.35)
+        fig.subplots_adjust(left=0.27, right=0.975, bottom=0.14, top=0.88)
         _path = OUT_DIR / _filename
         fig.savefig(_path, dpi=300)
         fig.savefig(_path.with_suffix(".pdf"))
         return fig
 
-    return (make_tc_summary_plot,)
+    def make_tc_direction_split_plot(_df, _estimates, _filename):
+        _df = _df.sort_values("tc_K").reset_index(drop=True)
+        fig, axes = plt.subplots(1, 2, figsize=(12.0, 6.2))
+
+        _resistor_tex = {
+            "100ohm": r"100\,\Omega",
+            "1kohm": r"1\,\mathrm{k}\Omega",
+        }
+
+        def _short_label(_r):
+            _resistor = _resistor_tex.get(_r["series_resistor"], _r["series_resistor"])
+            return rf"${int(_r['sample_current_mA_nominal'])}\,\mathrm{{mA}},\ {_resistor}$"
+
+        def _draw_panel(_ax, _direction, _title):
+            _panel = (
+                _df[_df["direction"] == _direction]
+                .sort_values("tc_K")
+                .reset_index(drop=True)
+            )
+            _estimate = _estimates.get(_direction)
+            _color, _marker, _legend_label = DIR_STYLES[_direction]
+            if _estimate is not None:
+                _title = (
+                    rf"{_title}: weighted ${_estimate['tc_K']:.2f}"
+                    rf"\pm{_estimate['sigma_K']:.2f}\,\mathrm{{K}}$"
+                )
+
+            if _estimate is not None:
+                _final_tc = _estimate["tc_K"]
+                _final_2sigma = 2.0 * _estimate["sigma_K"]
+                _ax.axvspan(
+                    _final_tc - _final_2sigma,
+                    _final_tc + _final_2sigma,
+                    color="black",
+                    alpha=0.08,
+                    lw=0,
+                    zorder=0,
+                )
+                _ax.axvline(
+                    _final_tc,
+                    color="black",
+                    lw=1.0,
+                    ls=(0, (4, 3)),
+                    alpha=0.75,
+                    zorder=1,
+                )
+
+            for _i, _r in _panel.iterrows():
+                _xerr = 2.0 * _r["tc_sigma_K"]
+                _ax.errorbar(
+                    _r["tc_K"], _i, xerr=_xerr,
+                    fmt=_marker, ms=6.6,
+                    color=_color, alpha=0.86,
+                    mfc=_color, mec=_color,
+                    mew=1.0,
+                    ecolor=_color, elinewidth=1.05,
+                    capsize=0, zorder=3,
+                )
+                _ax.text(
+                    _r["tc_K"] + _xerr + 0.14, _i,
+                    rf"${_r['tc_K']:.2f}$",
+                    va="center", ha="left",
+                    fontsize=9.2,
+                    color="black",
+                )
+
+            _labels = [_short_label(_r) for _, _r in _panel.iterrows()]
+            _ax.set_yticks(range(len(_panel)))
+            _ax.set_yticklabels(_labels, fontsize=10.3)
+            _ax.set_ylim(-0.55, len(_panel) - 0.45)
+            _ax.set_title(_title, fontsize=13.4, color="black", pad=9)
+            _ax.set_xlabel(r"$T_c^{\mathrm{slope}}\;\;(\mathrm{K})$")
+            _lo = float((_panel["tc_K"] - 2.0 * _panel["tc_sigma_K"]).min())
+            _hi = float((_panel["tc_K"] + 2.0 * _panel["tc_sigma_K"]).max())
+            _ax.set_xlim(_lo - 0.7, _hi + 1.0)
+            _ax.grid(True, axis="x", alpha=0.11, lw=0.55)
+            _ax.tick_params(axis="x", direction="in", length=3, top=False)
+            _ax.tick_params(axis="y", length=0)
+            for _side in ("top", "right", "left"):
+                _ax.spines[_side].set_visible(False)
+
+            _legend = [
+                Line2D([0], [0], color="black", lw=7, alpha=0.22,
+                       label=r"weighted mean $2\sigma$"),
+                Line2D([0], [0], marker=_marker, ls="none",
+                       color=_color, label=_legend_label),
+            ]
+            _ax.legend(
+                handles=_legend,
+                loc="lower right",
+                frameon=False,
+                fontsize=9.3,
+                handletextpad=0.45,
+                labelspacing=0.3,
+            )
+
+        _draw_panel(axes[0], "cool", "Cooling")
+        _draw_panel(axes[1], "heat", "Heating")
+        fig.subplots_adjust(left=0.085, right=0.985, bottom=0.14, top=0.84, wspace=0.23)
+        _path = OUT_DIR / _filename
+        fig.savefig(_path, dpi=300)
+        fig.savefig(_path.with_suffix(".pdf"))
+        return fig
+
+    return make_tc_direction_split_plot, make_tc_summary_plot
 
 
 @app.cell
 def _summary_plot(
+    make_tc_direction_split_plot,
     make_tc_summary_plot,
     reported_tc,
     reported_tc_by_direction,
@@ -982,20 +1100,25 @@ def _summary_plot(
         make_tc_summary_plot(
             _zero_field,
             reported_tc,
-            "heating and cooling weighted estimate",
+            "Zero-field run comparison",
             "tc_summary.png",
         ),
         make_tc_summary_plot(
             _zero_field[_zero_field["direction"] == "cool"],
             reported_tc_by_direction["cool"],
-            "cooling weighted estimate",
+            "Zero-field cooling runs",
             "tc_summary_cool.png",
         ),
         make_tc_summary_plot(
             _zero_field[_zero_field["direction"] == "heat"],
             reported_tc_by_direction["heat"],
-            "heating weighted estimate",
+            "Zero-field heating runs",
             "tc_summary_heat.png",
+        ),
+        make_tc_direction_split_plot(
+            _zero_field,
+            reported_tc_by_direction,
+            "tc_summary_heat_cool.png",
         ),
     ]
     return (summary_figs,)
